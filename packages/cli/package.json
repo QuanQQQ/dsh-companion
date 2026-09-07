@@ -1,0 +1,27 @@
+{
+  "name": "dsh-companion-cli",
+  "version": "0.1.0",
+  "description": "macOS Companion for DSH Task Services",
+  "type": "module",
+  "bin": { "dsh-companion": "lib/cli.mjs" },
+  "files": ["lib", "README.md", "LICENSE"],
+  "engines": { "node": ">=20" },
+  "license": "MIT",
+  "scripts": {
+    "clean": "node --input-type=module --eval "import { rmSync } from 'node:fs'; rmSync('lib', { recursive: true, force: true })"",
+    "build": "pnpm clean && tsc -p tsconfig.build.json && tsdown --config tsdown.config.ts && node --input-type=module --eval "import { chmodSync } from 'node:fs'; chmodSync('lib/cli.mjs', 0o755)"",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test "tests/**/*.spec.ts"",
+    "check": "pnpm typecheck && pnpm test && pnpm build",
+    "prepare": "pnpm build",
+    "prepack": "pnpm check"
+  },
+  "dependencies": { "ws": "^8.18.0" },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.13",
+    "tsdown": "^0.22.14",
+    "tsx": "^4.23.0",
+    "typescript": "^5.9.0"
+  }
+}
