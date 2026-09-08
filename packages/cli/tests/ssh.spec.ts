@@ -5,7 +5,8 @@ import { createConnection, createServer, type Server } from 'node:net'
 import { dirname, join } from 'node:path'
 import { PassThrough } from 'node:stream'
 import test, { type TestContext } from 'node:test'
-import type { ChildProcess } from 'node:child_process'
+import { execFile, type ChildProcess } from 'node:child_process'
+import { promisify } from 'node:util'
 import { SshExecutor, type SshCommandResult, type SshExecutorOptions, type SshRunner, type SshSpawn } from '../src/ssh.js'
 
 // These are Linux-portable contract tests, not evidence of macOS/OpenSSH integration.
@@ -14,6 +15,34 @@ const CONFIG = [
   'identityfile ~/.ssh/id_ed25519', 'identitiesonly yes', 'hostkeyalias pinned-box',
   'userknownhostsfile /home/alice/.ssh/known_hosts', 'globalknownhostsfile /etc/ssh/ssh_known_hosts',
 ].join('\n') + '\n'
+test('normal OpenSSH mixed-case keyword does not reject an otherwise safe configuration', async t => {
+  const f = await fixture(t)
+  f.state.config = CONFIG + 'canonicalizePermittedcnames none\n'
+  const child = await f.executor.start('lease', 5173)
+  const config = await readFile(join(dirname(child.controlPath), 'config'), 'utf8')
+  assert.ok(!config.toLowerCase().includes('canonicalizepermittedcnames'))
+  assert.ok(config.includes('HostName host.example.test'))
+})
+
+test('real system ssh -G defaults can be sanitized without a network connection', async t => {
+  let output: string
+  try {
+    const result = await promisify(execFile)('/usr/bin/ssh', [
+      '-G', '-F', '/dev/null', '-o', 'BatchMode=yes', '-o', 'PermitLocalCommand=no',
+      '-o', 'LocalCommand=none', '-o', 'RemoteCommand=none', '-o', 'ForwardAgent=no',
+      '-o', 'ForwardX11=no', '-o', 'CanonicalizeHostname=no', 'example.invalid',
+    ], { encoding: 'utf8', timeout: 5000, maxBuffer: 256 * 1024 })
+    output = result.stdout
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') { t.skip('System OpenSSH is not installed'); return }
+    throw error
+  }
+  const f = await fixture(t)
+  f.state.config = output
+  await f.executor.start('lease', 5173)
+  assert.equal(f.spawns.length, 1)
+})
+
 const ok = (stdout = '', stderr = ''): SshCommandResult => ({ code: 0, stdout, stderr })
 const denied = (): SshCommandResult => ({ code: 1, stdout: '', stderr: '' })
 class FakeChild extends EventEmitter {
@@ -168,7 +197,7 @@ test('refuses proxy commands/jumps and malformed allowlisted configuration', asy
     await assert.rejects(f.executor.start('lease', 3080), /SSH_UNSUPPORTED_PROXY/)
   }
   for (const config of [
-    CONFIG + 'hostname second.example\n', CONFIG.replace('host.example.test', 'evil # injected'),
+    CONFIG + 'hostname second.example\n', CONFIG + 'HostName second.example\n', CONFIG.replace('host.example.test', 'evil # injected'),
     CONFIG.replace('2222', '22 -L 0.0.0.0:99:x:99'), CONFIG + 'identityfile bad"\n',
     CONFIG + 'identityfile %h/secret\n', CONFIG + 'identityfile bad\\path\n',
     CONFIG.replace('/home/alice/.ssh/known_hosts', '/dev/null'), CONFIG + '\x00',

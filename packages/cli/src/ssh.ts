@@ -428,9 +428,11 @@ function privateConfig(alias: string, output: string): string {
   const values = new Map<string, string[]>()
   for (const line of output.split('\n')) {
     if (!line.trim()) continue
-    const match = /^([a-z][a-z0-9]*) (.+)$/.exec(line)
+    const match = /^([a-z][a-z0-9]*) (.+)$/i.exec(line)
     if (!match) throw new SshError('SSH_CONFIG_UNSAFE')
-    const key = match[1]!, value = match[2]!
+    // OpenSSH emits mixed-case keywords (e.g. canonicalizePermittedcnames).
+    // Normalize keys before duplicate checks; values remain case-sensitive.
+    const key = match[1]!.toLowerCase(), value = match[2]!
     const items = values.get(key) ?? []
     items.push(value)
     values.set(key, items)

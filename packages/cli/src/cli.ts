@@ -5,7 +5,7 @@ import { pathToFileURL } from 'node:url'
 import { setup, status, uninstall, type LifecycleDependencies } from './setup.js'
 import { restartLaunchAgent } from './launchd.js'
 
-export const VERSION = '0.1.1'
+export const VERSION = '0.1.2'
 export const HELP = 'Usage: dsh-companion <setup|install|daemon|status|restart|uninstall>\n' +
   '  setup (install is an alias) --server https://HOST --ssh-host SSH_ALIAS [--name NAME]\n' +
   '    [--node /absolute/path/to/node] [--allow-insecure-http] [--pair-code-stdin]\n' +

@@ -100,7 +100,7 @@ export async function runDaemon(): Promise<void> {
           fence = { authorityEpoch: frame.authorityEpoch, sessionEpoch: frame.sessionEpoch }
           connectedAt = Date.now()
           heartbeatMs = frame.heartbeatMs
-          send(ws, { v: 1, type: 'device.hello', ...fence, companionVersion: '0.1.1' })
+          send(ws, { v: 1, type: 'device.hello', ...fence, companionVersion: '0.1.2' })
           void status('connected').catch(() => settle(true))
           return
         }

@@ -52,3 +52,11 @@ PDM 项目 dsh-companion-package-validation 对干净 Git 归档执行重建/打
 0.1.1 只在 print 返回 113 且诊断精确匹配请求的服务 label 和 GUI UID 时视为未加载；113 的其他诊断和 bootout 失败不会获得放行。新增测试直接重放用户输出，从同一 setup 报错转为成功，并覆盖错误 UID、错误服务、权限/域错误以及停止安全边界。CLI 75 项、Plugin 39 项测试及类型检查、构建通过。
 
 刷新隔离页面后，下载返回 200，包含 0.1.1 版本和 113 修复，与本地文件 SHA-256 一致：48db29f12a4424888f1df03d51a045f726da47a05a31668bd16d35b889560575。用户需覆盖旧下载并重新执行 setup；此次修复尚未获得用户 Mac 重试成功的证据。未重启或更新稳定 DSH。
+
+## 2026-09-08：0.1.2 修复 OpenSSH 配置键大小写误判
+
+用户随后报告转发阶段 SSH_CONFIG_UNSAFE；其提供的主机、用户、端口、identityfile 和 known_hosts 字段均能通过已有值校验。使用真实系统 ssh -G（-F /dev/null，不建立连接）发现默认输出 canonicalizePermittedcnames 含大写 P，旧解析器只接受全小写键，因而拒绝正常完整输出。
+
+新增混合大小写样本和真实系统 OpenSSH 输出两项端到端执行器测试，均先复现 SSH_CONFIG_UNSAFE，再通过修复。0.1.2 按 SSH 键名不区分大小写的规则归一化键，保持值的大小写和窄白名单；不同大小写的重复 HostName 仍拒绝。CLI 77 项、Plugin 39 项测试、类型检查和打包全部通过。真实 ssh -G 运行于 Linux；隧道 spawn 和归属证据仍是测试替身，不声称 Mac 真实隧道已建立。
+
+隔离页面已刷新，下载返回 200，版本 0.1.2，SHA-256 与本地构建一致：af4dd107adbb9ac01657610f86e7d4e7b93111bf088070af3773a0bcb8ac5c48。现有安装需保留配对地替换固定 Library bundle；仅重新下载不会更新 LaunchAgent 使用的程序。手动更新步骤见 macos-cli-update.md。稳定 DSH 未变更；用户 Mac 更新后转发是否成功仍待确认。
