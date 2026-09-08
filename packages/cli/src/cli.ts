@@ -3,7 +3,7 @@ import { realpath } from 'node:fs/promises'
 import { companionPaths, normalizeServerUrl, readConfig, validateSshHost } from './config.js'
 import { Writable } from 'node:stream'
 import { resolve } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath } from 'node:url'
 import { setup, status, uninstall, type LifecycleDependencies } from './setup.js'
 import { restartLaunchAgent } from './launchd.js'
 import { systemCommandRunner } from './command.js'
@@ -45,6 +45,7 @@ export async function main(argv = process.argv.slice(2), deps: CliDependencies =
     const command = argv[0]
     if (command === 'launch') {
       const options = parseLaunchArgs(argv.slice(1))
+      out('DSH Companion '+VERSION+'：正在检查本地安装与 Host 配对…\n')
       const abort = new AbortController()
       const signal = deps.signal ? AbortSignal.any([abort.signal, deps.signal]) : abort.signal
       const cancel = () => abort.abort()
@@ -168,6 +169,13 @@ async function readPairCode(stdinOnly: boolean): Promise<string> {
   return code
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  process.exitCode = await main()
+async function isMainModule(): Promise<boolean> {
+  if (!process.argv[1]) return false
+  try {
+    // Node resolves entry symlinks; macOS commonly spells /private/var as /var in TMPDIR.
+    const [modulePath, entryPath] = await Promise.all([realpath(fileURLToPath(import.meta.url)), realpath(resolve(process.argv[1]))])
+    return modulePath === entryPath
+  } catch { return false } // Importing the CLI with unrelated/non-file argv must remain inert.
 }
+
+if (await isMainModule()) process.exitCode = await main()

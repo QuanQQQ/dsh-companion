@@ -86,3 +86,13 @@ CLI 130 项、Plugin 67 项通过，类型检查、构建、prepack 和 diff 检
 匿名 bootstrap.sh、bootstrap/cli.mjs 和 identity 返回 200；devices 保持 401。下载 SHA-256 与打包 CLI 一致：cff487196af05461aa63fd18495927ab89ea59dbe160a3cee8be71ace88c3114。PDM 开发远程策略为已启用、10.0.0.0/8、PIN 已配置，3083 实际监听 0.0.0.0。devbox 向自身 LAN URL 的额外探测被既有 HTTP 代理以 403 拒绝；没有改代理或绕过路由，不把 loopback 验证称为 Mac 端可达验证。
 
 最终插件 tgz：2f6669aa01096aa96128db2d1bc2c5b13bce9ddad85936dbce3b623f67c0ccae；CLI tgz：c5637c6f54cf426cb75d0ba5d47a88eb192388be1f961f0b541215cfc4d1c3d9。PDM 干净包验证未对 0.1.4 重跑；真实 Mac 的统一命令、Keychain、launchd、SSH 和睡眠唤醒仍待验收。未修改 Better Sidebar 源码，未改变稳定 Host。
+
+## 2026-09-08：0.1.5 修复路径别名下 CLI 静默退出
+
+用户在 Mac 执行统一命令后没有任何输出，Host 仍只记录旧 CLI。用真实 0.1.4 bundle 的 Node 子进程复现：真实路径 --version 正常，经符号链接目录启动则退出码 0、stdout 为空。入口判断将已被 Node 规范化的 import.meta.url 与未解析符号链接的 argv 路径比较；macOS 常见的 /var → /private/var 临时目录别名会触发这一缺陷。没有读取用户 Mac，因此真实 Mac 的具体路径仍待重跑确认。
+
+入口改为比较两端 realpath，保持普通模块导入及非文件 argv 不执行 CLI。统一 launch 在开始检查前立即输出版本与进度。新增真实子进程测试覆盖直接路径、目录别名、preserve-symlinks-main 和仅导入；测试临时目录明确使用 ESM，与发布 .mjs 一致。CLI 132 项和 Plugin 67 项通过，类型检查与打包通过。
+
+从运行中的 3083 公开入口实际下载 0.1.5，验证直接路径、目录别名、文件别名及 preserve-symlinks-main 四种方式均输出正确版本；别名路径 launch 输出进度并在 Linux 明确拒绝 Mac 生命周期操作。bootstrap 中的动态 SHA-256 与下载字节一致：b0e3be3bdd3d0485972a4036a0116a76abe6c2d4e6f4bfac13c5389af4bef42a。下载路由每次读取 bundle 并生成摘要，无需重启 Host。
+
+插件 tgz SHA-256：d15527fa3c443969868af658c3d7263c9d2335dfa49f5bcaa96b11a7921b35db；CLI tgz：43b750e3eb6a811442c2ed0cb80a02fada49b67460f41b38d1131c6da2b6c86b。未触及配对数据、Better Sidebar、代理设置或稳定 Host。Mac 实机重跑及上线仍需用户确认。
