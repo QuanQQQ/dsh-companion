@@ -22,7 +22,7 @@ Mac 127.0.0.1:5173 → SSH → devbox 127.0.0.1:5173
 1. 确认 Mac 的 Node.js 22+ 路径稳定。Companion 安装时记录绝对路径，后续删除该 Node 会导致 LaunchAgent 启动失败。
 2. 配置并验证一个本机 SSH alias（例如 `devbox`）。已知 Host Key 必须由用户通过可信途径验证并保存，认证须可非交互进行。Companion 不接受未知 Host Key、不托管 SSH 私钥。
 3. 登录 DSH → Settings → **Companion Devices** → **配对 Device**。下载“此版本 CLI”到 Downloads。
-4. 编辑页面里的 DSH 地址为 **Mac 实际可访问的 HTTPS origin**，填入本机 SSH alias。`127.0.0.1` 在 Mac 上指 Mac 本身，不是远端 devbox。
+4. 编辑页面里的 DSH 地址为 **Mac 实际可访问的 HTTPS origin**，填入本机 SSH alias。该地址必须已被 DSH 的 `webRuntime.trustedHosts` 接受，反向代理必须支持 WebSocket；填写地址不会自动扩大 Host 信任。`127.0.0.1` 在 Mac 上指 Mac 本身，不是远端 devbox。
 5. 在 Mac 执行页面命令，例如：
 
 ```bash
