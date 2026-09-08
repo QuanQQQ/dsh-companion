@@ -14,7 +14,7 @@ Mac 127.0.0.1:5173 → SSH → devbox 127.0.0.1:5173
 - `packages/cli`：`dsh-companion-cli`，单文件 JS bundle（包含 ws），提供 setup/install、daemon、status、restart、uninstall。
 - CLI 要求 macOS 和**外部安装的 Node.js 22+**。没有附带原生 Node 运行时，没有 codesign/notarization，不是无需运行时的独立 App。
 - Host 管理接口要求 DSH 的公开 `connection.requestRejection` 登录契约；已在 DSH 0.1.2-rc.1 隔离实例验证。缺失契约时返回 503，而不是降级为匿名管理。
-- Task Workspace 必须提供公开 HTTP Task API。Better Sidebar 是卡片容器。
+- Task Workspace 必须由 DSH profile 单独安装并提供公开 HTTP Task API；它不是本包的 JavaScript 模块依赖，也不要求其名称已发布到 npm。Better Sidebar 是卡片容器；其公开 0.13.1 类型是固定开发依赖，源码构建不依赖工作区外的参考目录。
 - 自动化验证不能替代真实 Mac 的 Apple SSH、Keychain、launchd、睡眠唤醒和断网验收；发布门禁见 [macOS 验收清单](docs/macos-acceptance.md)。
 
 ## Mac 安装与配对
