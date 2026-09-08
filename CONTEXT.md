@@ -12,6 +12,12 @@ _Avoid_: Client, agent, machine session
 Revocable trust between the DSH Host and a Device. Pairing persists independently of whether the Device is online.
 _Avoid_: Login, connection
 
+**Enrollment Request**:
+A bounded, expiring request from a Mac to become paired. Its visible verification code lets a logged-in human identify the requesting terminal; its separate secret poll capability delivers an approved credential once. The request alone grants no trust or Lease.
+
+**Unified Launch**:
+An explicit human invocation that fetches the intended Host's current program, verifies the stored pairing, and replaces the owned local process. A changed authority or rejected credential requires explicit new enrollment; it cannot inherit old forwarding authority.
+
 **Preferred Device**:
 A presentation default used to preselect a Device for a human action. It grants no authority and never causes migration or failover.
 _Avoid_: Primary Device, active Device

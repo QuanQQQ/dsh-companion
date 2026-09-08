@@ -1,5 +1,8 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { readFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { renderBootstrapScript } from './bootstrap.js'
+import { CompanionEnrollmentService, EnrollmentError } from './enrollment.js'
 import { CompanionError } from './domain.js'
 import type { CompanionService } from './service.js'
 import { isTrustedCompanionRequest } from './trust.js'
@@ -26,6 +29,7 @@ export function createCompanionHttpRoute(
   resolver?: TaskWorkspaceResolver,
   cliBundleUrl = new URL('./companion-cli.mjs', import.meta.url),
   authentication?: CompanionRequestAuthenticator,
+  enrollment = new CompanionEnrollmentService(service),
 ): CompanionHttpRoute {
   return {
     kind: 'prefix',
@@ -38,8 +42,11 @@ export function createCompanionHttpRoute(
         }
         const url = new URL(req.url ?? '/', 'http://dsh.internal')
         const relative = url.pathname.slice(COMPANION_API_PREFIX.length)
-        // Pairing has its own one-use secret; all management/read/download routes require browser auth.
-        if (!(req.method === 'POST' && relative === '/pair')) {
+        // Only code, authority identity, and capability-authenticated device enrollment are public.
+        // Browser management, including approving enrollment, still requires Host Connection auth.
+        const publicRequest = (req.method === 'GET' && ['/bootstrap.sh', '/bootstrap/cli.mjs', '/identity'].includes(relative)) ||
+          (req.method === 'POST' && ['/pair', '/enrollments/start', '/enrollments/poll', '/device/verify'].includes(relative))
+        if (!publicRequest) {
           if (typeof authentication?.requestRejection !== 'function') {
             sendError(res, 503, 'AUTH_UNAVAILABLE', 'Host Connection authentication API is unavailable')
             return
@@ -53,7 +60,11 @@ export function createCompanionHttpRoute(
           }
         }
 
-        if (req.method === 'GET' && relative === '/downloads/cli.mjs') {
+        if (req.method === 'GET' && relative === '/identity') {
+          sendJson(res, 200, { ok: true, authorityEpoch: service.authorityEpoch })
+          return
+        }
+        if (req.method === 'GET' && ['/downloads/cli.mjs', '/bootstrap/cli.mjs', '/bootstrap.sh'].includes(relative)) {
           let bundle: Buffer
           try { bundle = await readFile(cliBundleUrl) }
           catch (error) {
@@ -63,9 +74,29 @@ export function createCompanionHttpRoute(
             }
             throw error
           }
+          if (relative === '/bootstrap.sh') {
+            const script = renderBootstrapScript(createHash('sha256').update(bundle).digest('hex'))
+            res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' })
+            res.end(script)
+            return
+          }
           res.writeHead(200, { 'content-type': 'application/javascript; charset=utf-8', 'content-disposition': 'attachment; filename="dsh-companion.mjs"',
             'content-length': bundle.byteLength, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' })
           res.end(bundle)
+          return
+        }
+        if (req.method === 'GET' && relative === '/enrollments') {
+          sendJson(res, 200, { ok: true, requests: enrollment.list() })
+          return
+        }
+        if (req.method === 'POST' && relative === '/device/verify') {
+          const authorization = req.headers.authorization
+          if (typeof authorization !== 'string' || !/^Bearer [^\s]+$/.test(authorization)) {
+            sendError(res, 401, 'UNAUTHORIZED', 'Device credential required')
+            return
+          }
+          const device = service.authenticateDevice(authorization.slice(7))
+          sendJson(res, 200, { ok: true, deviceId: device.id, authorityEpoch: service.authorityEpoch })
           return
         }
         if (req.method === 'GET' && relative === '/devices') {
@@ -85,6 +116,26 @@ export function createCompanionHttpRoute(
         }
         const body = await readJsonObject(req, maxBodyBytes)
 
+        if (relative === '/enrollments/start') {
+          const request = enrollment.start({
+            installationId: requiredString(body.installationId, 'installationId'), name: requiredString(body.name, 'name'),
+            osVersion: requiredString(body.osVersion, 'osVersion'), architecture: requiredString(body.architecture, 'architecture'),
+            companionVersion: requiredString(body.companionVersion, 'companionVersion'),
+          })
+          sendJson(res, 201, { ok: true, request })
+          return
+        }
+        if (relative === '/enrollments/poll') {
+          sendJson(res, 200, { ok: true, ...enrollment.poll({requestId:requiredString(body.requestId, 'requestId'), pollToken:requiredString(body.pollToken, 'pollToken')}) })
+          return
+        }
+        const enrollmentAction = /^\/enrollments\/([^/]+)\/(approve|deny)$/.exec(relative)
+        if (enrollmentAction) {
+          const id = decodeRouteId(enrollmentAction[1])
+          const request = enrollmentAction[2] === 'approve' ? await enrollment.approve(id) : await enrollment.deny(id)
+          sendJson(res, 200, { ok: true, request })
+          return
+        }
         if (relative === '/pairings') {
           const ticket = await service.createPairingTicket(optionalInteger(body.ttlMs, 'ttlMs'))
           sendJson(res, 201, { ok: true, ticket })
@@ -155,7 +206,7 @@ export function createCompanionHttpRoute(
         sendError(res, 404, 'NOT_FOUND', 'endpoint not found')
       } catch (error) {
         if (error instanceof BodyError) sendError(res, error.status, error.code, error.message)
-        else if (error instanceof CompanionError) sendError(res, error.status, error.code, error.message)
+        else if (error instanceof CompanionError || error instanceof EnrollmentError) sendError(res, error.status, error.code, error.message)
         else {
           console.error('dsh-companion: HTTP request failed', error)
           sendError(res, 500, 'INTERNAL_ERROR', 'Companion request failed')

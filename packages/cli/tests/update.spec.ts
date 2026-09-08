@@ -116,6 +116,25 @@ test('local update replaces bundle, preserves pairing and runtime bytes, and pro
   await assert.rejects(stat(join(f.paths.root, 'update-journal.json')), { code: 'ENOENT' })
 })
 
+test('unified launch can request a fresh process even when installed bytes already match', async t => {
+  const f = await fixture(t)
+  await writeFile(f.paths.bundle,NEW)
+  await f.ready()
+  await update({...f.deps,forceRestart:true})
+  assert.equal(f.state.stops,1)
+  assert.equal(f.state.boots,1)
+  await f.unchanged()
+})
+
+test('a changed pairing config is refused under the update lock before any stop', async t => {
+  const f = await fixture(t)
+  await assert.rejects(update({...f.deps,expectedConfigHash:'0'.repeat(64)}),/Installation changed/)
+  assert.equal(f.state.stops,0)
+  assert.equal(f.state.boots,0)
+  assert.equal(await readFile(f.paths.bundle,'utf8'),OLD)
+  await f.unchanged()
+})
+
 test('same content is idempotent without bootout, bootstrap or bundle replacement', async t => {
   const f = await fixture(t)
   await writeFile(f.paths.bundle, NEW)

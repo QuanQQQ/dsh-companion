@@ -23,7 +23,9 @@ export async function runDaemon(): Promise<void> {
   const controller = new ForwardController(store, ssh)
   const statusFile = join(paths.root, 'daemon-status.json')
   let statusTail = Promise.resolve()
-  let attempts = await readAttempts(statusFile)
+  const previous = await readConnectionState(statusFile, config.deviceId)
+  let attempts = previous.attempts
+  let pairingRequired = previous.pairingRequired
   let stopping = false
   let socket: WebSocket | undefined
   let retryTimer: NodeJS.Timeout | undefined
@@ -39,7 +41,7 @@ export async function runDaemon(): Promise<void> {
   const done = new Promise<void>(resolve => { finish = resolve })
   const status = (state: string) => {
     statusTail = statusTail.then(() => atomicPrivateWrite(statusFile, JSON.stringify({
-      state, reconnectAttempts: attempts, deviceId: config.deviceId, pid: process.pid, companionVersion: VERSION, bootId,
+      state, reconnectAttempts: attempts, pairingRequired, deviceId: config.deviceId, pid: process.pid, companionVersion: VERSION, bootId,
       updatedAt: new Date().toISOString(),
     }) + '\n'))
     return statusTail
@@ -60,8 +62,8 @@ export async function runDaemon(): Promise<void> {
     try { await cleanup } catch { await status('cleanup_failed'); return }
     if (stopping) return
     attempts += 1
-    await status(permanent || attempts > 5 ? 'needs_attention' : 'reconnecting')
-    if (permanent || attempts > 5) return
+    await status(pairingRequired ? 'needs_pairing' : permanent || attempts > 5 ? 'needs_attention' : 'reconnecting')
+    if (pairingRequired || permanent || attempts > 5) return
     retryTimer = setTimeout(() => { void connect().catch(() => status('needs_attention')) }, Math.min(30_000, 1000 * 2 ** attempts))
   }
   const connect = (): Promise<void> => {
@@ -72,6 +74,7 @@ export async function runDaemon(): Promise<void> {
   const doConnect = async () => {
     await cleanup
     if (socket) return
+    if (pairingRequired) { await status('needs_pairing'); return }
     if (stopping || attempts > 5) { await status('needs_attention'); return }
     const token = await new MacKeychain().read(config.deviceId)
     if (stopping || socket) return
@@ -88,8 +91,15 @@ export async function runDaemon(): Promise<void> {
       void schedule(permanent).catch(() => { /* remain stopped if status persistence fails */ })
     }
     ws.on('error', () => settle())
-    ws.on('unexpected-response', (_req, res) => { res.resume(); settle(res.statusCode === 401 || res.statusCode === 403) })
-    ws.on('close', code => settle(code === 4001 || code === 4003 || code === 1008))
+    ws.on('unexpected-response', (_req, res) => {
+      res.resume()
+      if (res.statusCode === 401 || res.statusCode === 403) pairingRequired = true
+      settle(pairingRequired)
+    })
+    ws.on('close', code => {
+      if (code === 4003) pairingRequired = true
+      settle(code === 4001 || code === 4003 || code === 1008)
+    })
     ws.on('message', (raw: RawData, binary: boolean) => {
       if (stopping || socket !== ws || terminal) return
       try {
@@ -99,6 +109,7 @@ export async function runDaemon(): Promise<void> {
         lastFrameAt = Date.now()
         if (frame.type === 'host.hello') {
           if (fence) throw new Error('Duplicate hello')
+          if (frame.authorityEpoch !== config.authorityEpoch) { pairingRequired = true; settle(true); return }
           controller.connect(frame)
           fence = { authorityEpoch: frame.authorityEpoch, sessionEpoch: frame.sessionEpoch }
           connectedAt = Date.now()
@@ -152,6 +163,7 @@ export async function runDaemon(): Promise<void> {
     if (stopping || socket || connecting) return
     clearTimeout(retryTimer)
     attempts = 0
+    pairingRequired = false // Explicit local retry probes again; only Host authentication can restore trust.
     void status('reconnecting').then(connect).catch(() => status('needs_attention'))
   }
   process.on('SIGTERM', stop)
@@ -159,7 +171,7 @@ export async function runDaemon(): Promise<void> {
   process.on('SIGHUP', retry)
   try {
     await controller.initialize()
-    await status('ready')
+    await status(pairingRequired ? 'needs_pairing' : 'ready')
     await connect().catch(() => status('needs_attention'))
     await done
     await status('stopped')
@@ -175,13 +187,14 @@ export async function runDaemon(): Promise<void> {
   }
 }
 
-async function readAttempts(path: string): Promise<number> {
+export async function readConnectionState(path: string, deviceId: string): Promise<{attempts:number;pairingRequired:boolean}> {
   try {
-    const value = JSON.parse(await readFile(path, 'utf8')) as { reconnectAttempts?: unknown }
+    const value = JSON.parse(await readFile(path, 'utf8')) as { reconnectAttempts?: unknown; pairingRequired?:unknown; state?:unknown; deviceId?:unknown }
+    if (value.deviceId !== deviceId) throw new Error('Daemon observation belongs to a different Device; use unified launch to recover pairing')
     if (!Number.isSafeInteger(value.reconnectAttempts) || (value.reconnectAttempts as number) < 0) throw new Error('Invalid reconnect state')
-    return value.reconnectAttempts as number
+    return { attempts: value.reconnectAttempts as number, pairingRequired: value.pairingRequired === true || value.state === 'needs_pairing' }
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {attempts:0,pairingRequired:false}
     throw error
   }
 }

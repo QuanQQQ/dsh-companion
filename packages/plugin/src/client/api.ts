@@ -100,6 +100,24 @@ export async function getTaskSnapshot(taskId: string, signal?: AbortSignal): Pro
   return payload.snapshot as TaskSnapshotDto
 }
 
+export interface EnrollmentDto {
+  requestId: string; userCode: string; name: string; osVersion: string; architecture: string;
+  companionVersion: string; createdAt: string; expiresAt: string; status: string;
+  deviceId?: string; errorCode?: string
+}
+export async function listEnrollments(): Promise<EnrollmentDto[]> {
+  return asRecord(await requestJson('/api/companion/enrollments')).requests as EnrollmentDto[]
+}
+export async function approveEnrollment(id: string): Promise<void> {
+  await requestJson('/api/companion/enrollments/'+encodeURIComponent(id)+'/approve',jsonPost({}))
+}
+export async function denyEnrollment(id: string): Promise<void> {
+  await requestJson('/api/companion/enrollments/'+encodeURIComponent(id)+'/deny',jsonPost({}))
+}
+export async function getCompanionIdentity(): Promise<string> {
+  return String(asRecord(await requestJson('/api/companion/identity')).authorityEpoch)
+}
+
 export async function listDevices(signal?: AbortSignal): Promise<DeviceDto[]> {
   const payload = asRecord(await requestJson('/api/companion/devices', signal ? { signal } : {}))
   return payload.devices as DeviceDto[]

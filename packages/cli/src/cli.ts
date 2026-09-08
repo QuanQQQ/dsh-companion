@@ -6,10 +6,13 @@ import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { setup, status, uninstall, type LifecycleDependencies } from './setup.js'
 import { restartLaunchAgent } from './launchd.js'
+import { systemCommandRunner } from './command.js'
+import type { LaunchDependencies, LaunchOptions, LaunchResult } from './launch.js'
 
 import { VERSION } from './version.js'
 export { VERSION } from './version.js'
-export const HELP = 'Usage: dsh-companion <setup|install|update|daemon|status|restart|uninstall>\n' +
+export const HELP = 'Usage: dsh-companion <launch|setup|install|update|daemon|status|restart|uninstall>\n' +
+  '  launch --server https://HOST [--ssh-host SSH_ALIAS]: unified start, replacement and browser approval.\n' +
   '  setup (install is an alias) --server https://HOST --ssh-host SSH_ALIAS [--name NAME]\n' +
   '    [--node /absolute/path/to/node] [--allow-insecure-http] [--pair-code-stdin]\n' +
   '  First setup reads a hidden pairing code; repeat setup with matching settings updates without re-pairing.\n' +
@@ -18,11 +21,12 @@ export const HELP = 'Usage: dsh-companion <setup|install|update|daemon|status|re
   '  Update briefly interrupts Companion forwards; missing or unverifiable installations fail safely.\n' +
   '  status reports local installation/launchctl state, not Host connectivity.\n'
 
-export interface CliDependencies extends LifecycleDependencies {
+export interface CliDependencies extends LaunchDependencies {
   readPairCode?: (stdinOnly: boolean) => Promise<string>
   stdout?: (text: string) => void
   stderr?: (text: string) => void
   runDaemon?: () => Promise<void>
+  runLaunch?: (options: LaunchOptions, deps: LaunchDependencies) => Promise<LaunchResult>
   runUpdate?: (deps: LifecycleDependencies) => Promise<{ version: string; changed: boolean; note?: string }>
 }
 
@@ -39,7 +43,32 @@ export async function main(argv = process.argv.slice(2), deps: CliDependencies =
   }
   try {
     const command = argv[0]
-    if (command === 'setup' || command === 'install') {
+    if (command === 'launch') {
+      const options = parseLaunchArgs(argv.slice(1))
+      const abort = new AbortController()
+      const signal = deps.signal ? AbortSignal.any([abort.signal, deps.signal]) : abort.signal
+      const cancel = () => abort.abort()
+      process.on('SIGINT', cancel)
+      process.on('SIGTERM', cancel)
+      process.on('SIGHUP', cancel)
+      const question = async (text: string) => {
+        if (!process.stdin.isTTY) throw new Error('Unified launch needs an interactive terminal for first authorization')
+        const rl = createInterface({input:process.stdin,output:process.stdout})
+        try { return await rl.question(text, {signal}) } finally { rl.close() }
+      }
+      try {
+        const launched = await (deps.runLaunch ?? (async (o,d) => (await import('./launch.js')).launch(o,d)))(options, {
+          ...deps, signal,
+          promptSshHost: deps.promptSshHost ?? (async current => (await question('本机 SSH alias' + (current ? ' ['+current+']' : '') + ': ')).trim() || current || ''),
+          confirmRepair: deps.confirmRepair ?? (async info => /^(y|yes)$/i.test((await question('本地配对与此 Host 不匹配 ('+info.reason+')。从 '+info.oldServer+' 切换/重新授权到 '+info.newServer+'？旧 Lease 不会迁移 [y/N]: ')).trim())),
+          showApproval: deps.showApproval ?? (async info => {
+            out('请在 '+info.serverUrl+' 的 Settings → Companion Devices 核对验证码 '+info.userCode+' 并点击允许。无需复制配对密钥。\n')
+            try { await (deps.runner ?? systemCommandRunner).run('/usr/bin/open',[info.serverUrl]) } catch { /* URL remains visible for manual navigation. */ }
+          }),
+        })
+        out('Companion 已启动：'+launched.config.serverUrl+'；设备 '+launched.config.deviceId+'。等待页面连接状态，旧 Lease 不会自动迁移。\n')
+      } finally { process.off('SIGINT',cancel); process.off('SIGTERM',cancel); process.off('SIGHUP',cancel) }
+    } else if (command === 'setup' || command === 'install') {
       const options = parseSetupArgs(argv.slice(1))
       let existing
       try { existing = await readConfig((deps.paths ?? companionPaths()).config) }
@@ -86,6 +115,16 @@ export async function main(argv = process.argv.slice(2), deps: CliDependencies =
     err((error instanceof Error ? error.message : 'Companion command failed') + '\n')
     return 1
   }
+}
+
+export function parseLaunchArgs(args: string[]): LaunchOptions {
+  if (args.includes('--pair-code-stdin')) throw new Error('Unified launch uses browser approval, not pairing codes')
+  const hasAlias = args.includes('--ssh-host')
+  const parsed = parseSetupArgs(hasAlias ? args : [...args,'--ssh-host','prompt-locally'])
+  return {serverUrl:parsed.serverUrl, allowInsecureHttp:parsed.allowInsecureHttp,
+    ...(hasAlias ? {sshHost:parsed.sshHost} : {}),
+    ...(parsed.name !== undefined ? {name:parsed.name} : {}),
+    ...(parsed.runtimePath !== undefined ? {runtimePath:parsed.runtimePath} : {})}
 }
 
 export function parseSetupArgs(args: string[]) {

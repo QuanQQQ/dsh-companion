@@ -1,38 +1,35 @@
-# 一键更新已安装的 Mac Companion
+# 统一启动与恢复
 
-从包含 update 命令的新版下载包（0.1.3 起）更新已安装的 Companion，包括 0.1.0–0.1.2。无需先卸载、重新配对或手工操作 LaunchAgent。
-
-## 唯一更新命令
-
-在 DSH → Companion Devices 的“更新 Companion”区域下载新版 CLI，覆盖 `~/Downloads/dsh-companion.mjs`，然后在 Mac 运行：
+用户入口是 DSH → Settings → Companion Devices 生成的同一条拉取执行命令。无须手动下载 CLI、选择 setup/update、复制 Library 文件或执行 launchctl。
 
 ```bash
-node "$HOME/Downloads/dsh-companion.mjs" update
+curl --disable -fsS --proto '=https' https://YOUR_DSH_HOST/api/companion/bootstrap.sh | bash -s -- https://YOUR_DSH_HOST
 ```
 
-每次更新都使用这条命令。update 使用正在执行的下载包，不从未知地址自动获取或执行代码；只重启旧安装路径的程序不会更新软件。
+请使用页面生成的真实 origin。需要 Mac 已有 Node.js 22+，初次询问本机 SSH alias。HTTPS 验证不会被绕过；测试 HTTP 必须明确许可。脚本只清理自己创建的临时目录，下载完整 bundle 并核对与脚本绑定的 SHA-256 后执行。SHA-256 不替代 TLS 和对脚本来源的信任。
 
-也可以重跑最初的 setup 命令：CLI 检测到已有配置且 Host、SSH alias、指定 Node 路径相同时，自动转入 update，不再要求新配对码。参数与旧配对不符时会拒绝，不能通过更新静默切换 Host 或 SSH alias。
+## 首次运行
 
-## 自动处理
+终端显示非秘密验证码，并打开 DSH。登录后到 Companion Devices，核对自己的 Mac 终端验证码，勾选确认并允许。后台通过随机轮询能力获取凭证并存入 Keychain，不在 argv、URL、配置或日志中放配对秘密。授权请求本身不授予任何 Lease。
 
-- 校验完整安装、私有文件、原 LaunchAgent plist 和已保存的 Node.js 22+ 运行时。
-- 在停止前暂存并验证新版；内容相同且没有待恢复事务时不重复替换或重启。
-- 停止固定用户 LaunchAgent，确认 daemon 停止后原子替换 bundle，再启动原 LaunchAgent，并等待目标版本的新本地启动标识。不会只凭 launchctl 返回 0 宣称新版已启动。
-- 保留 Device 身份、Keychain、配置、原 Lease 到期时间和持久重试预算；不读写 SSH 配置或代理设置。
-- 更新期间会短暂停止此 Mac 的转发。本地启动成功不等于 WSS 已在线；等待页面的 Device 在线后，如服务仍需处理，点击“重新检查”。
+## 再次运行
 
-## 失败与恢复
+拉取当前 Host 的新 bundle，先检查 Host 身份及已保存凭证。有效配对直接安全停止已知旧进程、更新并启动新进程，即使文件版本已相同也重新启动。原配对、配置、Forward Lease 和 Forward Instance 重试预算保留。用户主动运行命令且 Host 验证成功后，可触发一次明确的 WSS 重连，区别于后台自动重试。
 
-常规替换或启动失败会尝试恢复旧 bundle 并重新启动旧服务。无法确认停止或回滚失败时保留备份和更新记录，输出具体错误，不强行覆盖、删除凭证或按未知 PID 杀进程。正常错误退出后，可再次运行同一条 update 命令处理待恢复事务。
+## Host 改变或配对失效
 
-SIGKILL、断电或文件被外部改动可能留下无法证明归属的 `.install.lock` / `daemon.lock.reclaim`。这类异常会安全停止并要求检查，不自动删除不明锁；不承诺所有系统级故障都可无人工恢复。待恢复更新记录存在时，setup/uninstall 不会破坏它。
+同一 DSH_HOME 的普通重启保留配对；另一个测试 Home 是不同 Authority。统一入口先读取公开身份；不会把旧 token 发送到改变的 origin。身份重建或凭证被拒绝时，终端明确要求确认，再通过新的浏览器批准重新绑定。新安装身份和 Device 不继承旧 Lease。旧凭证在新绑定本地启动成功前保留用于回滚；不会先卸载旧安装。
 
-## 查看版本
+WSS 收到凭证拒绝或 Authority 不匹配时，关闭自有 SSH，记录 needs_pairing 并停止自动认证尝试。后台进程存在不代表仍被 Host 信任。普通网络失败不会被当成新的配对授权。
 
-```bash
-node "$HOME/Library/Application Support/DSH Companion/dsh-companion.mjs" --version
-node "$HOME/Library/Application Support/DSH Companion/dsh-companion.mjs" status
-```
+## 中断和失败
 
-本地 loaded/status 不代表 SSH 或远端应用健康。真实 macOS launchctl 行为仍以实机验收结果为准。
+替换及配对切换有私有备份、哈希和事务记录。常规失败尝试回滚；再次运行同一条统一命令可处理可验证的未完成配对事务。Ctrl-C/SIGTERM 会请求取消并等待本地清理；不能取消已经由管理员完成的远端批准，必要时在页面撤销没有使用的 Device。
+
+不明锁、文件归属改变、损坏记录或不能确认停止时会安全拒绝并保留恢复材料。SIGKILL/断电残留不明 .install.lock 或 daemon.lock.reclaim 不会被盲目删除。不要通过删锁、删 Keychain、关 Host Key 校验或杀未知 PID 绕过。
+
+新版本的本地 bootId、Device、版本、活 PID 和锁证明本地初始化；不等同 WSS、SSH、监听端口或应用健康。旧版回滚只可证明 LaunchAgent 注册。
+
+## 测试实例运维
+
+开发固定 PDM 项目 ID 和数据 Home，每个 Home 同时只运行一个 Host。清洁验证/另建项目使用隔离的数据库，不将两个实例的 state.json 合并或共享。稳定 DSH 的变更仍须 PDM 队列，统一 Mac 启动脚本不会更改稳定 Host。

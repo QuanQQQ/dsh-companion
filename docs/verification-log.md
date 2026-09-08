@@ -70,3 +70,19 @@ PDM 项目 dsh-companion-package-validation 对干净 Git 归档执行重建/打
 23 项新增更新器测试包括正常更新、同内容幂等、磁盘新版但后台旧版修复、未注册恢复、版本探测失败/降级拒绝、停止失败、原子替换失败回滚、bootstrap/ready 失败回滚、恢复材料保留、7 类无效 ready、原子状态文件替换竞争、并发锁、symlink/模式/归属检查。全量 CLI 105 项、Plugin 39 项通过，类型检查和打包通过；打包 CLI 的 update 分派在 Linux 安全拒绝 macOS 生命周期操作。
 
 刷新现有隔离 GUI，更新面板不依赖 ticket 显示；复制按钮出现成功反馈。读取浏览器剪贴板的自动化请求因权限未完成而超时，已通过导航取消，不宣称验证真实 Mac 剪贴板。下载返回 200，版本 0.1.3，包含完整 updater，SHA-256 与本地构建一致：6c86aaad31cc8cab859c765adc83a301c337e44d5ebe8c5e5e05da2851c2ef4c。真实 Mac 更新仍待用户执行确认。未改 Better Sidebar 源码，未更新或重启稳定 DSH。
+
+## 2026-09-08：0.1.4 统一拉取启动与配对恢复
+
+用户不接受先下载 CLI、再区分 setup/update。Companion Devices 改为生成一条 curl-to-bash 命令。Host 公开代码与非秘密 Authority 身份；请求授权、秘密轮询、登录后验证码核对/批准分离。请求本身不授信，批准事务拒绝任何已有 installationId，包括已撤销的记录，不能继承旧 Lease。
+
+统一 launch 检查原 Host 和 credential，匹配则强制替换/启动已知进程；换 origin/epoch 不读取或发送旧 token，失效凭证须明确确认后重新批准。普通网络/策略失败保留原配对。配对切换使用新的 installation/Device 和空新 epoch runtime，旧 Keychain 在新初始化成功前保留；私有 journal 支持同命令恢复，并绑定实际安装版本以支持新版入口恢复旧版事务。needs_pairing 在 daemon 停止/重启后保留；明确 SIGHUP 重试仍不能绕过 Host 授权。
+
+复现并修复空 Home 尚未配对时 Authority 未落盘的问题。真实文件测试确认同 Home 重建 service 后 Device 和 token 有效，不同 Home 拒绝旧 token。调查原配对“消失”：3083 production-local 原 Home 有旧 Device；3084 package-validation 是另一份空数据库。通过 PDM 启动原 3083 Home，启动前后 Authority、Device ID、tokenHash、installationIdHash 不变。原 Mac C06XMG02WC（CLI 0.1.1）仍显示离线，原 Lease 已按 TTL 关闭；没有替它续期或迁移。
+
+CLI 130 项、Plugin 67 项通过，类型检查、构建、prepack 和 diff 检查通过。包含真实 bash/Node/shasum 脚本测试（替身 Darwin/curl/TTY）、浏览器批准契约、文件持久化、身份失配、撤销、拒绝、网络、取消、回滚、不明锁、损坏备份和跨版本 journal 恢复。Mac 生命周期 runner 为注入测试，不是 Apple 系统验证。
+
+在现有 http://127.0.0.1:3083 刷新实页，验证单命令和旧 Device 显示。实际点击发现批准/拒绝客户端漏 Content-Type 导致 415；复用 jsonPost 修复并增加客户端回归。修复后网页核对验证码→批准→一次性交付 ready→Device verify 200 完整通过；仅测试 Device 随即撤销，无新 Lease。修正复选框与卡片布局后重新打包。
+
+匿名 bootstrap.sh、bootstrap/cli.mjs 和 identity 返回 200；devices 保持 401。下载 SHA-256 与打包 CLI 一致：cff487196af05461aa63fd18495927ab89ea59dbe160a3cee8be71ace88c3114。PDM 开发远程策略为已启用、10.0.0.0/8、PIN 已配置，3083 实际监听 0.0.0.0。devbox 向自身 LAN URL 的额外探测被既有 HTTP 代理以 403 拒绝；没有改代理或绕过路由，不把 loopback 验证称为 Mac 端可达验证。
+
+最终插件 tgz：2f6669aa01096aa96128db2d1bc2c5b13bce9ddad85936dbce3b623f67c0ccae；CLI tgz：c5637c6f54cf426cb75d0ba5d47a88eb192388be1f961f0b541215cfc4d1c3d9。PDM 干净包验证未对 0.1.4 重跑；真实 Mac 的统一命令、Keychain、launchd、SSH 和睡眠唤醒仍待验收。未修改 Better Sidebar 源码，未改变稳定 Host。

@@ -13,8 +13,8 @@ class ReadChangedError extends Error { constructor() { super('Private file chang
 const NOTE = 'Local initialization readiness is not proof of WSS connectivity or online forwarding; legacy rollback proves registration only.'
 const PHASES = ['preparing', 'prepared', 'stopping', 'cutover', 'starting', 'restored', 'committed'] as const
 type Phase = typeof PHASES[number]
-type Dependencies = ReturnType<typeof dependencies> & { readyTimeoutMs: number }
-export interface UpdateDependencies extends LifecycleDependencies { readyTimeoutMs?: number }
+type Dependencies = ReturnType<typeof dependencies> & { readyTimeoutMs: number; forceRestart: boolean }
+export interface UpdateDependencies extends LifecycleDependencies { readyTimeoutMs?: number; forceRestart?: boolean; expectedConfigHash?: string }
 interface Journal {
   schema: 1
   id: string
@@ -52,14 +52,16 @@ export interface UpdateResult {
 
 /** Local-only update from the currently running downloaded bundle; never pairs or fetches. */
 export async function update(deps: UpdateDependencies = {}): Promise<UpdateResult> {
-  const d: Dependencies = { ...dependencies(deps), readyTimeoutMs: deps.readyTimeoutMs ?? 10_000 }
+  const d: Dependencies = { ...dependencies(deps), readyTimeoutMs: deps.readyTimeoutMs ?? 10_000, forceRestart: deps.forceRestart === true }
   if (!Number.isSafeInteger(d.readyTimeoutMs) || d.readyTimeoutMs < 1 || d.readyTimeoutMs > 60_000) throw new Error('Invalid bounded readiness timeout')
   if (d.platform !== 'darwin') throw new Error('Companion local update requires macOS')
   numericVersion(d.version)
   validatePaths(d)
   await ownedDirectory(d.paths.root, d.uid)
   return withInstallLock(d.paths, async () => {
+    if (await exists(join(d.paths.root, 'rebind-journal.json'))) throw new Error('An interrupted pairing transition needs recovery; rerun the unified launch command')
     let installed = await installation(d)
+    if (deps.expectedConfigHash !== undefined && installed.configHash !== deps.expectedConfigHash) throw new Error('Installation changed while launch was authorizing; no update performed')
     const runtime = await verifyNodeRuntime(installed.config.runtimePath, d.runner)
     if (runtime !== installed.config.runtimePath) throw new Error('Saved Node runtime identity changed; installation retained')
     await rejectDowngrade(d, runtime)
@@ -106,7 +108,7 @@ export async function update(deps: UpdateDependencies = {}): Promise<UpdateResul
 
     const beforeStop = await registration(d)
     const alreadyReady = beforeStop === 'loaded' && (!hasReadyContract(d.version) || await localReady(d, d.version, journal.deviceId))
-    if (journal.oldHash === journal.newHash && alreadyReady) {
+    if (journal.oldHash === journal.newHash && alreadyReady && !d.forceRestart) {
       await cleanup(d, journal)
       return { version: d.version, changed: false, recovered, registration: 'loaded', localReady: hasReadyContract(d.version), note: NOTE }
     }
@@ -245,7 +247,7 @@ async function localReady(d: Dependencies, version: string, deviceId: string, pr
   if (!state || state.companionVersion !== version || state.deviceId !== deviceId ||
       typeof state.bootId !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(state.bootId) || state.bootId === previousBootId ||
       !Number.isSafeInteger(state.pid) || Number(state.pid) < 1 ||
-      !['ready', 'connecting', 'connected', 'reconnecting', 'needs_attention'].includes(String(state.state))) return false
+      !['ready', 'connecting', 'connected', 'reconnecting', 'needs_attention', 'needs_pairing'].includes(String(state.state))) return false
   const lock = join(d.paths.root, 'daemon.lock')
   if (!await exists(lock)) return false
   await ownedDirectory(lock, d.uid)

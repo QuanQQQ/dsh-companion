@@ -1,4 +1,5 @@
-import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { link, mkdir, open, readFile, rename, rm } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
 import { dirname } from 'node:path'
 import { emptyState, STATE_VERSION, type CompanionState } from './domain.js'
 
@@ -15,17 +16,31 @@ export class JsonCompanionStateStore implements CompanionStateStore {
       const parsed: unknown = JSON.parse(await readFile(this.filePath, 'utf8'))
       return normalizeState(parsed)
     } catch (error) {
-      if (isNodeError(error) && error.code === 'ENOENT') return emptyState()
+      if (isNodeError(error) && error.code === 'ENOENT') {
+        await this.persist(emptyState(), true)
+        return normalizeState(JSON.parse(await readFile(this.filePath, 'utf8')))
+      }
       throw error
     }
   }
 
-  async save(state: CompanionState): Promise<void> {
+  async save(state: CompanionState): Promise<void> { await this.persist(state, false) }
+
+  private async persist(state: CompanionState, initialize: boolean): Promise<void> {
     await mkdir(dirname(this.filePath), { recursive: true, mode: 0o700 })
-    const temporary = `${this.filePath}.${process.pid}.tmp`
-    await writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
-    await chmod(temporary, 0o600)
-    await rename(temporary, this.filePath)
+    const temporary = this.filePath + '.' + randomUUID() + '.tmp'
+    try {
+      const file = await open(temporary, 'wx', 0o600)
+      try { await file.writeFile(JSON.stringify(state, null, 2) + '\n'); await file.sync() }
+      finally { await file.close() }
+      if (initialize) {
+        // Publish a complete first authority once; concurrent initializers must not replace it.
+        try { await link(temporary, this.filePath) }
+        catch (error) { if (!isNodeError(error) || error.code !== 'EEXIST') throw error }
+      } else await rename(temporary, this.filePath)
+      const directory = await open(dirname(this.filePath), 'r')
+      try { await directory.sync() } finally { await directory.close() }
+    } finally { await rm(temporary, { force: true }) }
   }
 }
 

@@ -36,6 +36,8 @@ export interface CompanionIds {
 }
 
 export interface PairDeviceInput {
+  /** Browser enrollment never rotates an existing installation or inherits its leases. */
+  rejectExistingInstallation?: boolean
   code: string
   installationId: string
   name: string
@@ -115,6 +117,8 @@ export class CompanionService {
     return () => this.listeners.delete(listener)
   }
 
+  get authorityEpoch(): string { return this.state.authorityEpoch }
+
   snapshot(): CompanionState {
     return structuredClone(this.state)
   }
@@ -170,6 +174,9 @@ export class CompanionService {
       if (Date.parse(ticket.expiresAt) <= now) throw new CompanionError('PAIRING_CODE_EXPIRED', 'pairing code has expired', 410)
       ticket.consumedAt = iso(now)
 
+      if (input.rejectExistingInstallation && state.devices.some(device => device.installationIdHash === installationIdHash)) {
+        throw new CompanionError('INSTALLATION_EXISTS', 'enrollment requires a fresh installation identity', 409)
+      }
       const existing = state.devices.find(device => device.installationIdHash === installationIdHash && !device.revokedAt)
       const common = {
         installationIdHash,

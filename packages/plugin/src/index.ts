@@ -9,6 +9,7 @@ import {
   createCompanionTools,
 } from './agent-tools.js'
 import { CompanionDeviceHub } from './device-hub.js'
+import { CompanionEnrollmentService } from './enrollment.js'
 import { createCompanionHttpRoute, type CompanionHttpRoute, type CompanionRequestAuthenticator } from './http-route.js'
 import { CompanionService } from './service.js'
 import { JsonCompanionStateStore } from './store.js'
@@ -43,6 +44,7 @@ export async function apply(ctx: HostContext): Promise<void> {
   const dshHome = process.env.DSH_HOME ?? join(homedir(), '.dsh')
   const stateStore = new JsonCompanionStateStore(join(dshHome, 'companion', 'state.json'))
   const service = await CompanionService.create(stateStore)
+  const enrollment = new CompanionEnrollmentService(service)
   const resolver = createTaskWorkspaceResolver(ctx.webServer.port)
   const hub = new CompanionDeviceHub(service, trustedHosts, undefined, async () => {
     const tasks = await resolver.list()
@@ -53,7 +55,7 @@ export async function apply(ctx: HostContext): Promise<void> {
   for (const tool of createCompanionTools(service, resolver)) ctx.tools.register(tool)
 
   ctx.effect(
-    () => ctx.webServer.register(createCompanionHttpRoute(service, trustedHosts, undefined, resolver, undefined, ctx.connection)),
+    () => ctx.webServer.register(createCompanionHttpRoute(service, trustedHosts, undefined, resolver, undefined, ctx.connection, enrollment)),
     'dsh-companion: Host JSON API',
   )
   ctx.effect(
@@ -76,6 +78,7 @@ export async function apply(ctx: HostContext): Promise<void> {
   ctx.effect(() => () => {
     clearInterval(timer)
     hub.dispose()
+    enrollment.dispose()
   }, 'dsh-companion: reconciliation teardown')
 }
 

@@ -8,10 +8,13 @@
 
 ## 必测行为
 
-- [ ] 下载固定 bundle，验证 hash，与插件提供的 CLI 一致。
-- [ ] setup 隐藏配对码；检查进程 argv、plist、配置、日志没有 token 或配对码。
+- [ ] 页面单命令拉取完整脚本与 bundle、验证 hash、自动启动；不需要手动下载或选择 setup/update。
+- [ ] 初次启动的终端验证码与网页授权请求一致；未经登录或确认不能批准。检查 argv、URL、plist、配置、日志没有 token 或轮询秘密。
 - [ ] Keychain 写入/读取/删除；锁定、拒绝访问时停止，不退化成明文文件。
-- [ ] 重复 setup 拒绝覆盖；失败 bootout/Keychain 回滚保留必要恢复材料。
+- [ ] 同一命令重跑时验证原配对、停止旧进程、启动新版本；同版本也重新启动，不改变 Forward Instance 预算。
+- [ ] 同一 Host Home 重启配对和 Authority 不变；换 Home/换 Host/401/403 显式确认并重新授权，新 Device 不继承旧 Lease，旧 token 不发送到新 origin。
+- [ ] 网络故障不误判成重新配对；失效配对持久显示 needs_pairing，停止自有 SSH。
+- [ ] 配对切换的 bootout/Keychain/启动失败回滚；正常中断重跑同一命令恢复，Ctrl-C 等待清理。不能确认停止或归属时保留恢复材料。
 - [ ] LaunchAgent 登录启动；Node 路径不可用和配置损坏有明确诊断，不循环产生副作用。
 - [ ] Mac Chrome 请求 localhost:5173 实际到达 devbox 127.0.0.1:5173，两个端口相同。
 - [ ] lsof 确认只监听 127.0.0.1，不能出现 0.0.0.0 或 IPv6 wildcard；不存在额外 forward。
