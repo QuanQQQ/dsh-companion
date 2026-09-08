@@ -231,7 +231,7 @@ function dependencies(deps: LifecycleDependencies) {
   const runner = deps.runner ?? systemCommandRunner
   return { paths: deps.paths ?? companionPaths(), runner, keychain: deps.keychain ?? new MacKeychain(runner),
     fetch: deps.fetch ?? globalThis.fetch, bundleSource: deps.bundleSource ?? fileURLToPath(import.meta.url),
-    platform: deps.platform ?? process.platform, uid: deps.uid ?? currentUid(), version: deps.version ?? '0.1.0',
+    platform: deps.platform ?? process.platform, uid: deps.uid ?? currentUid(), version: deps.version ?? '0.1.1',
     isProcessAlive: deps.isProcessAlive ?? processAlive }
 }
 function requireMac(platform: NodeJS.Platform): void {

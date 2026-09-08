@@ -1,6 +1,6 @@
 # macOS 发布验收门禁
 
-本清单适用于 DSH Companion 0.1.0 的真实 Mac 验收。Linux fake runner、Node 单测和隔离 Web 验证不证明 Apple 系统行为。未提供每项证据前，不得称为 macOS 生产验收通过。
+本清单适用于 DSH Companion 0.1.x 的真实 Mac 验收。Linux fake runner、Node 单测和隔离 Web 验证不证明 Apple 系统行为。未提供每项证据前，不得称为 macOS 生产验收通过。
 
 ## 环境
 

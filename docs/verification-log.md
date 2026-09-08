@@ -44,3 +44,11 @@ PDM 项目 dsh-companion-package-validation 对干净 Git 归档执行重建/打
 - dsh-companion-cli-0.1.0.tgz：cba4281e336fcb12c5b590d9fb0d92d541760f92f7fb2248486ea73a51380599。
 
 真实 macOS 发布验收仍未进行，不能声称 Keychain/launchd/Apple SSH 已通过实机验证。稳定 DSH 未部署、未排队、未重启。
+
+## 2026-09-08：0.1.1 修复 Mac 初装误判
+
+用户在真实 Mac 上执行 launchctl print，报告当前 GUI 用户 501 下不存在 dev.deepseek.dsh-companion，退出码为 113。0.1.0 仅识别退出码 3，因而在配对前误报 Existing or unverifiable LaunchAgent。
+
+0.1.1 只在 print 返回 113 且诊断精确匹配请求的服务 label 和 GUI UID 时视为未加载；113 的其他诊断和 bootout 失败不会获得放行。新增测试直接重放用户输出，从同一 setup 报错转为成功，并覆盖错误 UID、错误服务、权限/域错误以及停止安全边界。CLI 75 项、Plugin 39 项测试及类型检查、构建通过。
+
+刷新隔离页面后，下载返回 200，包含 0.1.1 版本和 113 修复，与本地文件 SHA-256 一致：48db29f12a4424888f1df03d51a045f726da47a05a31668bd16d35b889560575。用户需覆盖旧下载并重新执行 setup；此次修复尚未获得用户 Mac 重试成功的证据。未重启或更新稳定 DSH。

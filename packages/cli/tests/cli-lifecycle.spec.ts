@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { companionPaths, normalizeServerUrl, parseConfig, readConfig, validateSshHost, writeConfig } from '../src/config.js'
 import { setup, status, uninstall, verifyNodeRuntime, type LifecycleDependencies } from '../src/setup.js'
-import { renderLaunchAgent } from '../src/launchd.js'
+import { launchAgentStatus, renderLaunchAgent, stopLaunchAgent } from '../src/launchd.js'
 import { main, parseSetupArgs } from '../src/cli.js'
 import type { CommandOptions, CommandRunner } from '../src/command.js'
 
@@ -19,12 +19,12 @@ async function fixture(t: { after(fn: () => Promise<unknown>): void }) {
   const source = join(home, 'cli.mjs')
   await writeFile(source, '// bundled CLI fixture')
   const calls: { file: string; args: readonly string[]; options?: CommandOptions | undefined }[] = []
-  const state = { loaded: false, bootstrapFailure: false, stopFailure: false, keychainFailure: false, removeFailure: false, requests: 0 }
+  const state = { loaded: false, printCode: 3, printStderr: '', bootstrapFailure: false, stopFailure: false, keychainFailure: false, removeFailure: false, requests: 0 }
   const credentials = new Map<string, string>()
   const runner: CommandRunner = { async run(file, args, opts) {
     calls.push({ file, args, options: opts })
     if (args[0] === '--version') return { code: 0, stdout: 'v22.20.0\n', stderr: '' }
-    if (args[0] === 'print') return { code: state.loaded ? 0 : 3, stdout: '', stderr: '' }
+    if (args[0] === 'print') return { code: state.loaded ? 0 : state.printCode, stdout: '', stderr: state.printStderr }
     if (args[0] === 'bootstrap') {
       if (state.bootstrapFailure) return { code: 5, stdout: '', stderr: 'do not leak raw stderr' }
       state.loaded = true
@@ -53,6 +53,47 @@ async function fixture(t: { after(fn: () => Promise<unknown>): void }) {
     } }
   return { home, paths, source, calls, state, credentials, deps }
 }
+
+test('setup accepts the macOS print exit 113 missing-service diagnostic', async t => {
+  const f = await fixture(t)
+  f.deps.uid = 501
+  f.state.printCode = 113
+  f.state.printStderr = 'Bad request.\nCould not find service "dev.deepseek.dsh-companion" in domain for user gui: 501\n'
+  const config = await setup(options, f.deps)
+  assert.equal(config.deviceId, 'dev_fixture')
+  assert.equal(f.state.requests, 1)
+  assert.equal(f.state.loaded, true)
+  assert.equal(f.calls.filter(call => call.args[0] === 'bootout').length, 0)
+})
+
+test('ambiguous launchctl failures still block setup before pairing or credential writes', async t => {
+  for (const [code, stderr] of [
+    [113, 'Bad request.'],
+    [113, 'Could not find domain for user gui: 501'],
+    [113, 'Bad request.\nCould not find service "other.service" in domain for user gui: 501'],
+    [113, 'Bad request.\nCould not find service "dev.deepseek.dsh-companion" in domain for user gui: 502'],
+    [113, 'Permission denied\nCould not find service "dev.deepseek.dsh-companion" in domain for user gui: 501'],
+    [1, 'Operation not permitted'],
+    [5, 'Input/output error'],
+  ] as const) {
+    const f = await fixture(t)
+    f.deps.uid = 501
+    f.state.printCode = code
+    f.state.printStderr = stderr
+    await assert.rejects(setup(options, f.deps), /Existing or unverifiable LaunchAgent/)
+    assert.equal(f.state.requests, 0)
+    assert.equal(f.credentials.size, 0)
+    await assert.rejects(stat(f.paths.bundle), { code: 'ENOENT' })
+    assert.equal(f.calls.some(call => ['enable', 'bootstrap', 'bootout'].includes(call.args[0] ?? '')), false)
+  }
+})
+
+test('exit 113 is print-specific and does not loosen bootout safety', async t => {
+  const f = await fixture(t)
+  const runner: CommandRunner = { async run() { return { code: 113, stdout: '', stderr: 'Bad request.\nCould not find service "dev.deepseek.dsh-companion" in domain for user gui: 501\n' } } }
+  assert.equal(await launchAgentStatus(runner, 501), 'not_loaded')
+  await assert.rejects(stopLaunchAgent(f.paths, runner, 501), /installation retained/)
+})
 
 test('HTTPS mandatory except loopback or explicit insecure HTTP; no credential origins', () => {
   for (const origin of ['http://localhost:3080', 'http://127.0.0.1:3080', 'http://127.0.0.2:3080', 'http://[::1]:3080']) assert.equal(normalizeServerUrl(origin), origin)

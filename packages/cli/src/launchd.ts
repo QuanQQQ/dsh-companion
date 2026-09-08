@@ -64,7 +64,15 @@ export async function restartLaunchAgent(runner: CommandRunner = systemCommandRu
 export async function launchAgentStatus(runner: CommandRunner = systemCommandRunner, uid = currentUid()): Promise<'loaded' | 'not_loaded' | 'unknown'> {
   platformGuard(runner)
   const result = await runner.run('/bin/launchctl', ['print', 'gui/' + uid + '/' + LAUNCH_AGENT_LABEL])
-  return result.code === 0 ? 'loaded' : result.code === 3 ? 'not_loaded' : 'unknown'
+  if (result.code === 0) return 'loaded'
+  if (result.code === 3) return 'not_loaded'
+  // launchctl print uses its own 113 status for a missing service on macOS.
+  // Require the exact requested label and GUI domain; 113 alone is not absence
+  // evidence and must never be generalized to bootout or other subcommands.
+  const diagnostic = result.stderr.replaceAll('\r\n', '\n').trim()
+  const missingService = 'Could not find service "' + LAUNCH_AGENT_LABEL + '" in domain for user gui: ' + uid
+  if (result.code === 113 && (diagnostic === missingService || diagnostic === 'Bad request.\n' + missingService)) return 'not_loaded'
+  return 'unknown'
 }
 
 export function currentUid(): number { return typeof process.getuid === 'function' ? process.getuid() : 0 }
