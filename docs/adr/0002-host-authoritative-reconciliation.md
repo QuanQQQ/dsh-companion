@@ -1,0 +1,3 @@
+# Make the Host authoritative and fence all convergence work
+
+The DSH Host owns Pairing, Forward Lease Desired State, expiry, Device selection, Forward Generation, and Forward Operation identity; the macOS Companion owns SSH processes and reports Observed State. Reconnection performs reconciliation rather than replaying assumed runtime state, and authority is ordered by Authority Epoch, Connection Session, Forward Generation, then operation identity plus canonical payload digest. This costs protocol and persistence complexity but prevents delayed messages, retries, reconnects, or offline Devices from creating authority, extending TTL, migrating a Lease, or resurrecting a closed Instance.

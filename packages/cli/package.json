@@ -5,13 +5,13 @@
   "type": "module",
   "bin": { "dsh-companion": "lib/cli.mjs" },
   "files": ["lib", "README.md", "LICENSE"],
-  "engines": { "node": ">=20" },
+  "engines": { "node": ">=22" },
   "license": "MIT",
   "scripts": {
-    "clean": "node --input-type=module --eval "import { rmSync } from 'node:fs'; rmSync('lib', { recursive: true, force: true })"",
-    "build": "pnpm clean && tsc -p tsconfig.build.json && tsdown --config tsdown.config.ts && node --input-type=module --eval "import { chmodSync } from 'node:fs'; chmodSync('lib/cli.mjs', 0o755)"",
+    "clean": "rm -rf lib",
+    "build": "pnpm clean && tsc -p tsconfig.build.json && tsdown --config tsdown.config.ts",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test "tests/**/*.spec.ts"",
+    "test": "node --import tsx --test tests/*.spec.ts",
     "check": "pnpm typecheck && pnpm test && pnpm build",
     "prepare": "pnpm build",
     "prepack": "pnpm check"

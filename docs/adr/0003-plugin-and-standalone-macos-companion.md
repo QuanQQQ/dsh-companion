@@ -1,0 +1,3 @@
+# Ship one DSH plugin and one standalone macOS Companion
+
+The product consists of one DSH Host/Web plugin and one Node-based macOS Companion CLI bundled into a fixed single-file JavaScript artifact that includes its JavaScript dependencies but requires an externally installed Node.js 22+ runtime. It is not a signed native executable and carries no macOS notarization claim. One setup command installs that artifact into a stable per-user path, stores the Device token in macOS Keychain, and manages a LaunchAgent; the SSH alias and target remain human-controlled local configuration. This avoids requiring unavailable native toolchains or a temporary package-runner path while keeping the Host unable to supply keys, destinations, proxy commands, or arbitrary SSH arguments.

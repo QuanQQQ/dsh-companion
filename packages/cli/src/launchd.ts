@@ -1,0 +1,76 @@
+import { constants } from 'node:fs'
+import { chmod, copyFile, mkdir, rm, writeFile } from 'node:fs/promises'
+import { dirname, isAbsolute } from 'node:path'
+import type { CompanionPaths } from './config.js'
+import { LAUNCH_AGENT_LABEL, absoluteRuntimePath } from './config.js'
+import { systemCommandRunner, type CommandRunner } from './command.js'
+
+export async function installBundle(source: string, destination: string): Promise<void> {
+  if (!isAbsolute(source) || !isAbsolute(destination) || !source.endsWith('.mjs')) throw new Error('Install requires an absolute bundled .mjs path')
+  await mkdir(dirname(destination), { recursive: true, mode: 0o700 })
+  // COPYFILE_EXCL is intentional: setup may not replace an older installation.
+  await copyFile(source, destination, constants.COPYFILE_EXCL)
+  try { await chmod(destination, 0o700) }
+  catch (error) { await rm(destination, { force: true }); throw error }
+}
+
+export function renderLaunchAgent(paths: CompanionPaths, runtimePath: string): string {
+  absoluteRuntimePath(runtimePath)
+  for (const path of [paths.bundle, paths.root, paths.stdoutLog, paths.stderrLog]) {
+    if (!isAbsolute(path) || /[\x00-\x1f\x7f]/.test(path)) throw new Error('LaunchAgent paths must be absolute and contain no controls')
+  }
+  const args = [runtimePath, paths.bundle, 'daemon']
+  return '<?xml version="1.0" encoding="UTF-8"?>\n' +
+    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n' +
+    '<plist version="1.0"><dict>\n' +
+    '<key>Label</key><string>' + LAUNCH_AGENT_LABEL + '</string>\n' +
+    '<key>ProgramArguments</key><array>' + args.map(value => '<string>' + xml(value) + '</string>').join('') + '</array>\n' +
+    '<key>WorkingDirectory</key><string>' + xml(paths.root) + '</string>\n' +
+    '<key>RunAtLoad</key><true/><key>KeepAlive</key><true/>\n' +
+    '<key>ThrottleInterval</key><integer>15</integer>\n' +
+    '<key>ProcessType</key><string>Background</string>\n' +
+    '<key>StandardOutPath</key><string>' + xml(paths.stdoutLog) + '</string>\n' +
+    '<key>StandardErrorPath</key><string>' + xml(paths.stderrLog) + '</string>\n' +
+    '</dict></plist>\n'
+}
+
+export async function installLaunchAgent(paths: CompanionPaths, runtimePath: string, runner: CommandRunner = systemCommandRunner, uid = currentUid()): Promise<void> {
+  platformGuard(runner)
+  const plist = renderLaunchAgent(paths, runtimePath)
+  await mkdir(dirname(paths.launchAgent), { recursive: true, mode: 0o700 })
+  await mkdir(paths.logDirectory, { recursive: true, mode: 0o700 })
+  await writeFile(paths.launchAgent, plist, { encoding: 'utf8', mode: 0o600, flag: 'wx' })
+  const domain = 'gui/' + uid
+  const enable = await runner.run('/bin/launchctl', ['enable', domain + '/' + LAUNCH_AGENT_LABEL])
+  if (enable.code !== 0) throw new Error('launchctl could not enable DSH Companion')
+  const bootstrap = await runner.run('/bin/launchctl', ['bootstrap', domain, paths.launchAgent])
+  if (bootstrap.code !== 0) throw new Error('launchctl bootstrap failed')
+  // RunAtLoad starts it; no kickstart -k race against the newly started daemon.
+}
+
+export async function stopLaunchAgent(paths: CompanionPaths, runner: CommandRunner = systemCommandRunner, uid = currentUid()): Promise<void> {
+  platformGuard(runner)
+  const result = await runner.run('/bin/launchctl', ['bootout', 'gui/' + uid + '/' + LAUNCH_AGENT_LABEL])
+  // ESRCH means no registered service; other failures must retain recovery files.
+  if (result.code !== 0 && result.code !== 3) throw new Error('launchctl could not stop DSH Companion; installation retained')
+}
+
+export async function restartLaunchAgent(runner: CommandRunner = systemCommandRunner, uid = currentUid()): Promise<void> {
+  platformGuard(runner)
+  const result = await runner.run('/bin/launchctl', ['kickstart', '-k', 'gui/' + uid + '/' + LAUNCH_AGENT_LABEL])
+  if (result.code !== 0) throw new Error('launchctl restart failed')
+}
+
+export async function launchAgentStatus(runner: CommandRunner = systemCommandRunner, uid = currentUid()): Promise<'loaded' | 'not_loaded' | 'unknown'> {
+  platformGuard(runner)
+  const result = await runner.run('/bin/launchctl', ['print', 'gui/' + uid + '/' + LAUNCH_AGENT_LABEL])
+  return result.code === 0 ? 'loaded' : result.code === 3 ? 'not_loaded' : 'unknown'
+}
+
+export function currentUid(): number { return typeof process.getuid === 'function' ? process.getuid() : 0 }
+function platformGuard(runner: CommandRunner): void {
+  if (runner === systemCommandRunner && process.platform !== 'darwin') throw new Error('LaunchAgent lifecycle requires macOS')
+}
+function xml(value: string): string {
+  return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&apos;')
+}

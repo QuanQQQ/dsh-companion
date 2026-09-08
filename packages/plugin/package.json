@@ -11,7 +11,7 @@
     "./package.json": "./package.json"
   },
   "files": ["lib", "cordis.patch.yml", "README.md", "CONTEXT.md", "LICENSE"],
-  "engines": { "node": ">=20" },
+  "engines": { "node": ">=22" },
   "license": "MIT",
   "dsh": {
     "bundle": { "patch": "./cordis.patch.yml" },
@@ -21,11 +21,11 @@
     }
   },
   "scripts": {
-    "clean": "node --input-type=module --eval "import { rmSync } from 'node:fs'; rmSync('lib', { recursive: true, force: true })"",
+    "clean": "rm -rf lib",
     "build": "pnpm clean && tsc -p tsconfig.build.json && tsdown --config tsdown.config.ts",
     "dev:client": "tsdown --watch --config tsdown.config.ts",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test "tests/**/*.spec.ts"",
+    "test": "node --import tsx --test tests/*.spec.ts",
     "check": "pnpm typecheck && pnpm test && pnpm build",
     "prepare": "pnpm build",
     "prepack": "pnpm check"

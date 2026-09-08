@@ -1,5 +1,17 @@
 export default [
   {
+    name: 'companion-cli-download',
+    entry: ['../cli/src/cli.ts'],
+    format: 'esm',
+    platform: 'node',
+    target: 'node22',
+    outDir: 'lib',
+    clean: false,
+    dts: false,
+    deps: { alwaysBundle: ['ws'], neverBundle: [] },
+    outputOptions: { inlineDynamicImports: true, entryFileNames: 'companion-cli.mjs', banner: '#!/usr/bin/env node' },
+  },
+  {
     entry: ['src/index.ts'],
     format: 'esm',
     platform: 'node',
