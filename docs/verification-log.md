@@ -25,3 +25,22 @@
 - 没有稳定 profile 更改、稳定更新排队或稳定 Host 重启。
 
 自动化测试数量会随回归补充增长；发布制品应绑定打包时的检查输出与 SHA-256，而不是依赖这份中间记录的固定计数。
+
+## 2026-09-08：归档可重建修复与最终制品验证
+
+源码提交：65a031bfde11a322520f80a37667ed34ce73babd。
+
+PDM 归档重建最初因工作区外相对 link 类型依赖失效而报 TS2307。修复为固定的公开 dsh-better-sidebar@0.13.1 开发依赖，并移除仅通过 HTTP 集成的未发布 Task Workspace 的模块依赖声明；仓库固定 npm registry，禁止 node-pty 构建脚本。无脚本安装、全包类型检查、111 项测试（CLI 72 + Plugin 39）和构建全部通过。
+
+PDM 项目 dsh-companion-package-validation 对干净 Git 归档执行重建/打包，把精确 tarball 安装进全新 DSH 后验证健康，时间 2026-09-08T12:20:57.594Z，allowBuilds=[]。临时验证 Host 已由 PDM 自动停止。该结果验证 Companion 制品本身，不代表整个外部插件组合通过干净重建。
+
+组合项目 dsh-companion-production-local 的完整干净重建在 Companion 打包成功后，被参考 Sidebar 的 HEAD 未合入 main 门禁拒绝。没有合并、修改或绕过该参考仓库。组合功能的浏览器证据仍来自现有只读链接依赖；此限制保留在最终制品 manifest。
+
+刷新隔离页面后 Task Services 卡片仍正常加载，已登录 Devices API 和 CLI 下载均为 200。下载的 CLI 与 tarball 内 package/lib/companion-cli.mjs 的 SHA-256 相同：52548ea07021a6a67db46a111d0aa9ee87d0aff4fbe4a62133b9346aacc2ca5a。
+
+最终制品：
+
+- dsh-companion-0.1.0.tgz：aa4397b865f2e77c6466f6a4f2718fe33f081bfbb4c3173a860c6aade1a670b7（PDM 实际验证的文件）。
+- dsh-companion-cli-0.1.0.tgz：cba4281e336fcb12c5b590d9fb0d92d541760f92f7fb2248486ea73a51380599。
+
+真实 macOS 发布验收仍未进行，不能声称 Keychain/launchd/Apple SSH 已通过实机验证。稳定 DSH 未部署、未排队、未重启。
