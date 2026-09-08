@@ -96,3 +96,15 @@ CLI 130 项、Plugin 67 项通过，类型检查、构建、prepack 和 diff 检
 从运行中的 3083 公开入口实际下载 0.1.5，验证直接路径、目录别名、文件别名及 preserve-symlinks-main 四种方式均输出正确版本；别名路径 launch 输出进度并在 Linux 明确拒绝 Mac 生命周期操作。bootstrap 中的动态 SHA-256 与下载字节一致：b0e3be3bdd3d0485972a4036a0116a76abe6c2d4e6f4bfac13c5389af4bef42a。下载路由每次读取 bundle 并生成摘要，无需重启 Host。
 
 插件 tgz SHA-256：d15527fa3c443969868af658c3d7263c9d2335dfa49f5bcaa96b11a7921b35db；CLI tgz：43b750e3eb6a811442c2ed0cb80a02fada49b67460f41b38d1131c6da2b6c86b。未触及配对数据、Better Sidebar、代理设置或稳定 Host。Mac 实机重跑及上线仍需用户确认。
+
+## 2026-09-08：0.1.6 等待异步停止与恢复 stopping journal
+
+Mac 报告 update journal phase=stopping、oldVersion=0.1.3、targetVersion=0.1.5；daemon-status 为 stopped、版本 0.1.3，install/daemon/reclaim 三个锁均不存在。这将失败范围定位到停止确认阶段，不能仅凭最终快照区分 launchctl 返回异常与检查早于收尾。
+
+两项回归先失败并产生相同的笼统 recovery 错误：bootout 返回后旧 daemon 才异步写 stopped/删除锁；launchd 接受停止后仍短暂报告 loaded。修复为注销和已验证锁拥有者的收尾分别有界等待，默认各 10 秒。等待不持有 acquisition mutex，不反复 bootout，不删除活 PID 的锁；未知状态、PID 探测失败、锁身份变化仍拒绝。更新、软件回滚和显式配对切换采用同一停止边界。
+
+真实文件夹具覆盖用户提供的 stopping＋旧版 stopped＋无锁现场，下一次调用从保存 journal 恢复旧程序后完成更新，配对/config/runtime 保持不变。另覆盖永不退出、注销超时、等待中 nonce 改变。错误输出增加 STOP_REQUEST_FAILED、STOP_REGISTRATION_UNKNOWN、STOP_REGISTRATION_TIMEOUT、DAEMON_STOP_TIMEOUT、DAEMON_LOCK_UNVERIFIABLE 等安全分类，不传播原始命令 stderr，不再让用户改跑下载 CLI 的 update 子命令。
+
+CLI 138 项、Plugin 67 项通过，类型检查、打包、git diff 检查通过。3083 公开下载返回 200，经符号链接运行输出 dsh-companion 0.1.6；bootstrap 摘要与实际下载字节匹配：3aa8df8324296402386a5de36b29f169c1a9cbbbcc17d9e658d4824ec847706c。插件 tgz：9a133c9eddfcd10ddc7b327002de5d8c1d0d0664d285e7f3ad43efa53b9f536c；CLI tgz：b8a4dc85b65cf46862e86069d1a3fcfe20d5bbd1548777d8c96336fc1146b9df。
+
+Mac 再次运行后的实际恢复和在线状态仍待用户确认。没有删除用户锁或恢复文件，没有改配对、代理、Better Sidebar 或稳定 Host，也没有为下载替换重启 3083。

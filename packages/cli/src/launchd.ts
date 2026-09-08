@@ -48,6 +48,23 @@ export async function installLaunchAgent(paths: CompanionPaths, runtimePath: str
   // RunAtLoad starts it; no kickstart -k race against the newly started daemon.
 }
 
+export class LaunchAgentStopError extends Error {
+  constructor(readonly code: 'STOP_REQUEST_FAILED' | 'STOP_REGISTRATION_UNKNOWN' | 'STOP_REGISTRATION_TIMEOUT') { super(code + ': cannot confirm owned LaunchAgent shutdown; installation retained') }
+}
+
+export async function waitForLaunchAgentStop(runner: CommandRunner, uid: number, timeoutMs = 10_000): Promise<void> {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60_000) throw new Error('Invalid bounded LaunchAgent stop timeout')
+  const deadline = performance.now() + timeoutMs
+  for (;;) {
+    const state = await launchAgentStatus(runner, uid)
+    if (state === 'not_loaded') return
+    if (state === 'unknown') throw new LaunchAgentStopError('STOP_REGISTRATION_UNKNOWN')
+    const remaining = deadline - performance.now()
+    if (remaining <= 0) throw new LaunchAgentStopError('STOP_REGISTRATION_TIMEOUT')
+    await new Promise<void>(resolve => setTimeout(resolve, Math.min(25, remaining)))
+  }
+}
+
 export async function stopLaunchAgent(paths: CompanionPaths, runner: CommandRunner = systemCommandRunner, uid = currentUid()): Promise<void> {
   platformGuard(runner)
   const result = await runner.run('/bin/launchctl', ['bootout', 'gui/' + uid + '/' + LAUNCH_AGENT_LABEL])

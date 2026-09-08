@@ -5,7 +5,7 @@ import { arch, hostname, release } from 'node:os'
 import { join } from 'node:path'
 import { atomicPrivateWrite, createInstallationId, LAUNCH_AGENT_LABEL, normalizeServerUrl, parseConfig, validateSshHost, type CompanionConfig } from './config.js'
 import { dependencies, setup, withInstallLock, withStoppedDaemonLock, type LifecycleDependencies } from './setup.js'
-import { launchAgentStatus, renderLaunchAgent, stopLaunchAgent } from './launchd.js'
+import { launchAgentStatus, renderLaunchAgent, stopLaunchAgent, waitForLaunchAgentStop } from './launchd.js'
 import { update, type UpdateDependencies, type UpdateResult } from './update.js'
 
 export interface LaunchOptions { serverUrl: string; allowInsecureHttp?: boolean; sshHost?: string; runtimePath?: string; name?: string }
@@ -18,6 +18,7 @@ export interface LaunchDependencies extends LifecycleDependencies {
   pollIntervalMs?: number
   enrollmentTimeoutMs?: number
   readyTimeoutMs?: number
+  stopTimeoutMs?: number
   signal?: AbortSignal
 }
 export interface LaunchResult { action: 'installed' | 'updated' | 'rebound'; config: CompanionConfig }
@@ -27,6 +28,8 @@ const REBIND_JOURNAL = 'rebind-journal.json'
 
 export async function launch(options: LaunchOptions, deps: LaunchDependencies = {}): Promise<LaunchResult> {
   const d: Dependencies = { ...deps, ...dependencies(deps) }
+  d.stopTimeoutMs ??= 10_000
+  if (!Number.isSafeInteger(d.stopTimeoutMs) || d.stopTimeoutMs < 1 || d.stopTimeoutMs > 60_000) throw new Error('Invalid bounded stop timeout')
   if (d.platform !== 'darwin') throw new Error('Companion launch requires macOS')
   const serverUrl = normalizeServerUrl(options.serverUrl, options.allowInsecureHttp)
   d.signal?.throwIfAborted()
@@ -161,7 +164,7 @@ async function rebind(d: Dependencies, previous: CompanionConfig, previousHash: 
         await atomicPrivateWrite(d.paths.config, JSON.stringify(config))
         await atomicPrivateWrite(d.paths.runtimeState, JSON.stringify({ version: 1, authorityEpoch: config.authorityEpoch, operations: [], instances: [] }))
         await rm(destination(d, 'status'), { force: true })
-      })
+      }, d.stopTimeoutMs ?? 10_000)
       await bootReady(d, config, true)
     } catch {
       try { await rollbackPairing(d, j) }
@@ -195,12 +198,12 @@ async function rollbackPairing(d: Dependencies, j: RebindJournal): Promise<void>
         if (j.backups[key] === null) await rm(destination(d, key), { force: true })
         else await atomicPrivateWrite(destination(d, key), await privateText(backupPath(d, j, key), d.uid))
       }
-    })
+    }, d.stopTimeoutMs ?? 10_000)
   } else if (currentHash !== j.oldConfigHash) throw new Error('Unexpected pairing recovery phase')
   const state = await launchAgentStatus(d.runner, d.uid)
   if (state === 'unknown') throw new Error('Cannot verify old LaunchAgent for rollback')
   if (state === 'not_loaded') {
-    await withStoppedDaemonLock(d.paths, d.uid, d.isProcessAlive, async () => {})
+    await withStoppedDaemonLock(d.paths, d.uid, d.isProcessAlive, async () => {}, d.stopTimeoutMs ?? 10_000)
     await bootReady(d, j.oldConfig)
   }
   j.phase = 'rolled_back'
@@ -242,7 +245,7 @@ async function recoverRebind(d: Dependencies): Promise<void> {
   // must prove its own boot version, not the version of a newer fetched launcher.
   const recovery: Dependencies = { ...d, version: j.bundleVersion }
   if (j.phase === 'committed') {
-    if (!await localReady(recovery, j.newConfig)) { await stopOwned(recovery); await withStoppedDaemonLock(d.paths, d.uid, d.isProcessAlive, async () => {}); await bootReady(recovery, j.newConfig) }
+    if (!await localReady(recovery, j.newConfig)) { await stopOwned(recovery); await withStoppedDaemonLock(d.paths, d.uid, d.isProcessAlive, async () => {}, d.stopTimeoutMs ?? 10_000); await bootReady(recovery, j.newConfig) }
     await finishCommitted(recovery, j)
   } else await rollbackPairing(recovery, j)
 }
@@ -250,7 +253,7 @@ async function stopOwned(d: Dependencies): Promise<void> {
   const state = await launchAgentStatus(d.runner, d.uid)
   if (state === 'unknown') throw new Error('Cannot verify the owned LaunchAgent')
   if (state === 'loaded') await stopLaunchAgent(d.paths, d.runner, d.uid)
-  if (await launchAgentStatus(d.runner, d.uid) !== 'not_loaded') throw new Error('Cannot confirm LaunchAgent stopped')
+  await waitForLaunchAgentStop(d.runner, d.uid, d.stopTimeoutMs ?? 10_000)
 }
 async function bootReady(d: Dependencies, config: CompanionConfig, honorCancellation = false): Promise<void> {
   let baseline: string | undefined

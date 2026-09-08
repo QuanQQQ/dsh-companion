@@ -26,6 +26,8 @@ WSS 收到凭证拒绝或 Authority 不匹配时，关闭自有 SSH，记录 nee
 
 替换及配对切换有私有备份、哈希和事务记录。常规失败尝试回滚；再次运行同一条统一命令可处理可验证的未完成配对事务。Ctrl-C/SIGTERM 会请求取消并等待本地清理；不能取消已经由管理员完成的远端批准，必要时在页面撤销没有使用的 Device。
 
+停止请求返回不等于 daemon 已完成收尾。统一启动分别给 LaunchAgent 注销、已验证旧 daemon 的锁释放提供默认 10 秒轮询窗口；只等待，不重复发送停止请求或回收活 PID 的锁。等待时释放自己的 acquisition mutex；锁身份变化、未知注册状态或 PID 探测权限错误立即拒绝。已停机但留下 stopping journal 的安装仍由同一启动命令恢复。
+
 不明锁、文件归属改变、损坏记录或不能确认停止时会安全拒绝并保留恢复材料。SIGKILL/断电残留不明 .install.lock 或 daemon.lock.reclaim 不会被盲目删除。不要通过删锁、删 Keychain、关 Host Key 校验或杀未知 PID 绕过。
 
 新版本的本地 bootId、Device、版本、活 PID 和锁证明本地初始化；不等同 WSS、SSH、监听端口或应用健康。旧版回滚只可证明 LaunchAgent 注册。

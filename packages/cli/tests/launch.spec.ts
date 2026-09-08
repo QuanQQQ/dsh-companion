@@ -28,7 +28,7 @@ async function fixture(t: TestContext, installed = true) {
   const calls: { url: string; init?: RequestInit | undefined }[] = []
   const state = { epoch: installed ? 'old-epoch' : 'new-epoch', verifyCode: 200, verifyError: '', updates: 0, loaded: installed, stops: 0, boots: 0, failBoot: false, failStop: false, failReady: false, networkFailure: false, polls: 0, pollStatus: 'ready', approvalIds: [] as string[], approvals: [] as unknown[], confirmed: true, prompts: [] as unknown[], activePid: 999001, afterApproval: undefined as (() => Promise<void>) | undefined }
   const deps: LaunchDependencies = {
-    paths, bundleSource: source, platform: 'darwin', uid: process.getuid?.() ?? 0, version: '0.1.4', readyTimeoutMs: 30, pollIntervalMs: 1, enrollmentTimeoutMs: 500,
+    paths, bundleSource: source, platform: 'darwin', uid: process.getuid?.() ?? 0, version: '0.1.4', readyTimeoutMs: 30, stopTimeoutMs: 500, pollIntervalMs: 1, enrollmentTimeoutMs: 500,
     isProcessAlive: pid => state.loaded && pid === state.activePid,
     promptSshHost: async () => 'devbox',
     confirmRepair: async p => { state.prompts.push(p); return state.confirmed },
@@ -117,6 +117,20 @@ test('authority reset at the same origin does not receive the previous credentia
   await launch({ serverUrl: f.config.serverUrl }, f.deps)
   assert.equal((f.state.prompts[0] as { reason: string }).reason, 'authority_reset')
   assert.ok(f.calls.every(c => !new Headers(c.init?.headers).has('authorization')))
+})
+
+test('approved rebind waits for delayed launchd unregistration', async t => {
+  const f = await fixture(t)
+  const run = f.deps.runner!.run.bind(f.deps.runner)
+  let remaining=2
+  f.deps.runner={run:async(file,args,options)=>{
+    if(args[0]==='print' && f.state.stops===1 && f.state.boots===0 && remaining-->0) return {code:0,stdout:'',stderr:''}
+    return run(file,args,options)
+  }}
+  const result=await launch({serverUrl:'https://new.example'},f.deps)
+  assert.equal(result.action,'rebound')
+  assert.equal(f.state.stops,1)
+  assert.equal(f.state.boots,1)
 })
 
 test('401 requires explicit replacement and never transfers old Device leases', async t => {

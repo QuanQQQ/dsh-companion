@@ -3,8 +3,8 @@ import { createHash, randomUUID } from 'node:crypto'
 import { lstat, open, realpath, rename, rm } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { atomicPrivateWrite, LAUNCH_AGENT_LABEL, parseConfig, type CompanionConfig } from './config.js'
-import { launchAgentStatus, renderLaunchAgent, stopLaunchAgent } from './launchd.js'
-import { dependencies, verifyNodeRuntime, withInstallLock, withStoppedDaemonLock, type LifecycleDependencies } from './setup.js'
+import { launchAgentStatus, renderLaunchAgent, stopLaunchAgent, waitForLaunchAgentStop, LaunchAgentStopError } from './launchd.js'
+import { dependencies, DaemonStopError, verifyNodeRuntime, withInstallLock, withStoppedDaemonLock, type LifecycleDependencies } from './setup.js'
 
 const JOURNAL = 'update-journal.json'
 const MAX_BUNDLE = 8 * 1024 * 1024
@@ -13,8 +13,8 @@ class ReadChangedError extends Error { constructor() { super('Private file chang
 const NOTE = 'Local initialization readiness is not proof of WSS connectivity or online forwarding; legacy rollback proves registration only.'
 const PHASES = ['preparing', 'prepared', 'stopping', 'cutover', 'starting', 'restored', 'committed'] as const
 type Phase = typeof PHASES[number]
-type Dependencies = ReturnType<typeof dependencies> & { readyTimeoutMs: number; forceRestart: boolean }
-export interface UpdateDependencies extends LifecycleDependencies { readyTimeoutMs?: number; forceRestart?: boolean; expectedConfigHash?: string }
+type Dependencies = ReturnType<typeof dependencies> & { readyTimeoutMs: number; stopTimeoutMs: number; forceRestart: boolean }
+export interface UpdateDependencies extends LifecycleDependencies { readyTimeoutMs?: number; stopTimeoutMs?: number; forceRestart?: boolean; expectedConfigHash?: string }
 interface Journal {
   schema: 1
   id: string
@@ -52,8 +52,9 @@ export interface UpdateResult {
 
 /** Local-only update from the currently running downloaded bundle; never pairs or fetches. */
 export async function update(deps: UpdateDependencies = {}): Promise<UpdateResult> {
-  const d: Dependencies = { ...dependencies(deps), readyTimeoutMs: deps.readyTimeoutMs ?? 10_000, forceRestart: deps.forceRestart === true }
+  const d: Dependencies = { ...dependencies(deps), readyTimeoutMs: deps.readyTimeoutMs ?? 10_000, stopTimeoutMs: deps.stopTimeoutMs ?? 10_000, forceRestart: deps.forceRestart === true }
   if (!Number.isSafeInteger(d.readyTimeoutMs) || d.readyTimeoutMs < 1 || d.readyTimeoutMs > 60_000) throw new Error('Invalid bounded readiness timeout')
+  if (!Number.isSafeInteger(d.stopTimeoutMs) || d.stopTimeoutMs < 1 || d.stopTimeoutMs > 60_000) throw new Error('Invalid bounded stop timeout')
   if (d.platform !== 'darwin') throw new Error('Companion local update requires macOS')
   numericVersion(d.version)
   validatePaths(d)
@@ -130,9 +131,9 @@ export async function update(deps: UpdateDependencies = {}): Promise<UpdateResul
           await rename(stagePath(d, journal), d.paths.bundle)
           await syncDirectory(d.paths.root)
         }
-      })
-    } catch {
-      if (!confirmedStopped) throw recoveryError()
+      }, d.stopTimeoutMs)
+    } catch (error) {
+      if (!confirmedStopped) throw recoveryError(error)
       try { await restore(d, journal) }
       catch { throw recoveryError() }
       throw new Error('Update cutover failed; previous bundle restored and LaunchAgent registered. Pairing retained')
@@ -188,7 +189,7 @@ async function restore(d: Dependencies, journal: Journal): Promise<void> {
     await durableBundle(d.paths.bundle, original)
     journal.phase = 'restored'
     await saveJournal(d, journal)
-  })
+  }, d.stopTimeoutMs)
   // Reclaim mutex must be released before launchd starts a daemon that acquires it.
   await bootstrap(d, journal.oldHash, journal.oldVersion, journal.deviceId)
   await cleanup(d, journal)
@@ -276,9 +277,9 @@ async function stopKnownAgent(d: Dependencies): Promise<void> {
   const state = await registration(d)
   if (state === 'loaded') {
     try { await stopLaunchAgent(d.paths, d.runner, d.uid) }
-    catch { throw recoveryError() }
+    catch { throw new LaunchAgentStopError('STOP_REQUEST_FAILED') }
   }
-  if (await registration(d) !== 'not_loaded') throw recoveryError()
+  await waitForLaunchAgentStop(d.runner, d.uid, d.stopTimeoutMs)
 }
 async function registration(d: Dependencies): Promise<'loaded' | 'not_loaded'> {
   let state
@@ -362,7 +363,10 @@ async function cleanup(d: Dependencies, journal: Journal): Promise<void> {
 function stagePath(d: Dependencies, journal: Journal): string { return join(d.paths.root, '.update-' + journal.id + '.mjs') }
 function backupPath(d: Dependencies, journal: Journal): string { return join(d.paths.root, '.backup-' + journal.id + '.mjs') }
 function digest(bytes: Buffer): string { return createHash('sha256').update(bytes).digest('hex') }
-function recoveryError(): Error { return new Error('Update safety or startup is uncertain; original backup and recovery journal retained. Rerun downloaded CLI update after resolving the reported lifecycle/lock failure') }
+function recoveryError(cause?: unknown): Error {
+  const code = cause instanceof DaemonStopError || cause instanceof LaunchAgentStopError ? cause.code : 'OWNERSHIP_OR_STARTUP_UNCERTAIN'
+  return new Error('Update safety or startup is uncertain [' + code + ']; original backup and recovery journal retained. Rerun the same unified launch command; do not delete recovery files')
+}
 async function assertHash(path: string, hash: string, uid: number): Promise<Buffer> {
   const bytes = await ownedFile(path, uid, MAX_BUNDLE)
   if (digest(bytes) !== hash) throw new Error('Update recovery hash mismatch; recovery retained')

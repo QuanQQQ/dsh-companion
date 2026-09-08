@@ -150,10 +150,35 @@ export async function status(deps: LifecycleDependencies = {}): Promise<Record<s
     note: 'Persisted daemon observation may be stale; loaded does not mean connected. Restart preserves reconnect budget.' }
 }
 
-export async function withStoppedDaemonLock<T>(paths: CompanionPaths, uid: number, alive: (pid: number) => boolean, action: () => Promise<T>): Promise<T> {
+export class DaemonStopError extends Error {
+  constructor(readonly code: 'DAEMON_LOCK_UNVERIFIABLE' | 'DAEMON_STOP_TIMEOUT', message: string) { super(message) }
+}
+interface StoppingOwner { root: string; lock: string }
+class DaemonStillStopping extends Error { constructor(readonly owner: StoppingOwner) { super('Known daemon is still stopping') } }
+
+export async function withStoppedDaemonLock<T>(paths: CompanionPaths, uid: number, alive: (pid: number) => boolean, action: () => Promise<T>, timeoutMs = 0): Promise<T> {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > 60_000) throw new Error('Invalid bounded daemon stop timeout')
+  const deadline = performance.now() + timeoutMs
+  let owner: StoppingOwner | undefined
+  for (;;) {
+    try { return await tryStoppedDaemonLock(paths, uid, alive, action, owner) }
+    catch (error) {
+      if (!(error instanceof DaemonStillStopping)) throw error
+      owner = error.owner
+      const remaining = deadline - performance.now()
+      if (remaining <= 0) throw new DaemonStopError('DAEMON_STOP_TIMEOUT', 'Daemon lock is still held after bounded shutdown wait; installation retained for manual recovery')
+      // The acquisition mutex has been released. The daemon must be allowed to finish.
+      await new Promise<void>(resolve => setTimeout(resolve, Math.min(25, remaining)))
+    }
+  }
+}
+
+async function tryStoppedDaemonLock<T>(paths: CompanionPaths, uid: number, alive: (pid: number) => boolean, action: () => Promise<T>, expected?: StoppingOwner): Promise<T> {
   const recovery = 'Daemon lock ownership or liveness is uncertain; installation retained. Inspect daemon.lock and daemon.lock.reclaim for manual recovery'
   const root = await lstat(paths.root)
-  if (!root.isDirectory() || root.isSymbolicLink() || root.uid !== uid || (root.mode & 0o077) !== 0) throw new Error(recovery)
+  if (!root.isDirectory() || root.isSymbolicLink() || root.uid !== uid || (root.mode & 0o077) !== 0) throw new DaemonStopError('DAEMON_LOCK_UNVERIFIABLE', recovery)
+  const rootIdentity = root.dev + ':' + root.ino
+  if (expected && expected.root !== rootIdentity) throw new DaemonStopError('DAEMON_LOCK_UNVERIFIABLE', recovery)
   const lockPath = join(paths.root, 'daemon.lock')
   const reclaimPath = join(paths.root, 'daemon.lock.reclaim')
   // Use the daemon's own acquisition mutex. Never reclaim an existing mutex:
@@ -164,27 +189,32 @@ export async function withStoppedDaemonLock<T>(paths: CompanionPaths, uid: numbe
   try {
     if (await exists(lockPath)) {
       const lock = await lstat(lockPath)
-      if (!lock.isDirectory() || lock.isSymbolicLink() || lock.uid !== uid || (lock.mode & 0o077) !== 0) throw new Error(recovery)
+      if (!lock.isDirectory() || lock.isSymbolicLink() || lock.uid !== uid || (lock.mode & 0o077) !== 0) throw new DaemonStopError('DAEMON_LOCK_UNVERIFIABLE', recovery)
       const names = (await readdir(lockPath)).sort()
-      if (names.join(',') !== 'nonce,pid') throw new Error(recovery)
+      if (names.join(',') !== 'nonce,pid') throw new DaemonStopError('DAEMON_LOCK_UNVERIFIABLE', recovery)
       for (const name of names) {
         const info = await lstat(join(lockPath, name))
-        if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.uid !== uid || (info.mode & 0o077) !== 0 || info.size > 64) throw new Error(recovery)
+        if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.uid !== uid || (info.mode & 0o077) !== 0 || info.size > 64) throw new DaemonStopError('DAEMON_LOCK_UNVERIFIABLE', recovery)
       }
       const pidText = await readFile(join(lockPath, 'pid'), 'utf8')
       const nonce = await readFile(join(lockPath, 'nonce'), 'utf8')
       const pid = Number(pidText)
-      if (pidText !== pidText.trim() || nonce !== nonce.trim() || !/^[1-9][0-9]*$/.test(pidText) || !Number.isSafeInteger(pid) || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(nonce)) throw new Error(recovery)
-      try { if (alive(pid)) throw new Error(recovery) } catch { throw new Error(recovery) }
+      if (pidText !== pidText.trim() || nonce !== nonce.trim() || !/^[1-9][0-9]*$/.test(pidText) || !Number.isSafeInteger(pid) || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(nonce)) throw new DaemonStopError('DAEMON_LOCK_UNVERIFIABLE', recovery)
+      const owner = {root:rootIdentity, lock:[lock.dev,lock.ino,pid,nonce].join(':')}
+      if (expected && expected.lock !== owner.lock) throw new DaemonStopError('DAEMON_LOCK_UNVERIFIABLE', recovery)
+      let running: boolean
+      try { running = alive(pid) } catch { throw new DaemonStopError('DAEMON_LOCK_UNVERIFIABLE', recovery) }
+      if (running) throw new DaemonStillStopping(owner)
       // Fail closed if ownership changed during the signal-0 probe. Never stop a process by saved PID.
+      if (!await exists(lockPath)) return await action() // The observed daemon completed its own release.
       const current = await lstat(lockPath)
-      if (current.dev !== lock.dev || current.ino !== lock.ino || await readFile(join(lockPath, 'nonce'), 'utf8') !== nonce) throw new Error(recovery)
+      if (current.dev !== lock.dev || current.ino !== lock.ino || await readFile(join(lockPath, 'nonce'), 'utf8') !== nonce || await readFile(join(lockPath, 'pid'), 'utf8') !== pidText) throw new DaemonStopError('DAEMON_LOCK_UNVERIFIABLE', recovery)
       await rm(lockPath, { recursive: true })
     }
     return await action()
   } finally {
     const current = await lstat(reclaimPath)
-    if (current.dev !== mutex.dev || current.ino !== mutex.ino) throw new Error(recovery)
+    if (current.dev !== mutex.dev || current.ino !== mutex.ino) throw new DaemonStopError('DAEMON_LOCK_UNVERIFIABLE', recovery)
     // Only remove our still-owned empty mutex, never recurse into a foreign directory.
     await rmdir(reclaimPath)
   }

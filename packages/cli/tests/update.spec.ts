@@ -82,14 +82,14 @@ async function fixture(t: TestContext) {
       state.activePid++
       state.lastBootContent = content
       state.loaded = !(state.invisibleNew && content === NEW)
-      await ready(content === OLD ? '0.1.2' : '0.1.3')
+      await ready(content === OLD ? (state.installedVersion ?? '0.1.2') : deps.version!)
       await state.afterBootstrap?.()
       return { code: state.failBoots.has(state.boots) ? 5 : 0, stdout: '', stderr: 'RAW_SECRET_MUST_NOT_ESCAPE' }
     }
     throw new Error('Unexpected updater command')
   } }
   const creds = async () => { state.keychainCalls++; throw new Error('Updater must not touch Keychain') }
-  const deps: UpdateDependencies = { paths, runner, bundleSource: source, platform: 'darwin', uid, version: '0.1.3', readyTimeoutMs: 30, isProcessAlive: pid => state.loaded && pid === state.activePid && !(state.readyMode === 'dead' && state.lastBootContent === NEW),
+  const deps: UpdateDependencies = { paths, runner, bundleSource: source, platform: 'darwin', uid, version: '0.1.3', readyTimeoutMs: 30, stopTimeoutMs: 500, isProcessAlive: pid => state.loaded && pid === state.activePid && !(state.readyMode === 'dead' && state.lastBootContent === NEW),
     fetch: async () => { state.networkCalls++; throw new Error('Updater must not access network') },
     keychain: { read: creds, store: creds, remove: creds } }
   const unchanged = async () => {
@@ -132,6 +132,96 @@ test('a changed pairing config is refused under the update lock before any stop'
   assert.equal(f.state.stops,0)
   assert.equal(f.state.boots,0)
   assert.equal(await readFile(f.paths.bundle,'utf8'),OLD)
+  await f.unchanged()
+})
+
+test('bootout may return before the daemon writes stopped and removes its lock', async t => {
+  const f = await fixture(t)
+  await f.ready()
+  const oldPid = f.state.activePid
+  const alive = f.deps.isProcessAlive!
+  let stoppingObserved = false
+  f.deps.isProcessAlive = pid => {
+    if (pid === oldPid && !f.state.loaded && !stoppingObserved) {
+      stoppingObserved = true
+      setImmediate(() => {
+        fs.writeFileSync(join(f.paths.root,'daemon-status.json'),JSON.stringify({state:'stopped',companionVersion:'0.1.3',pid:oldPid,deviceId:f.config.deviceId}))
+        fs.rmSync(join(f.paths.root,'daemon.lock'),{recursive:true,force:true})
+      })
+      return true
+    }
+    return alive(pid)
+  }
+  const result = await update(f.deps)
+  assert.equal(stoppingObserved,true)
+  assert.equal(result.localReady,true)
+  assert.equal(f.state.stops,1)
+  assert.equal(f.state.boots,1)
+  await f.unchanged()
+  await assert.rejects(lstat(join(f.paths.root,'update-journal.json')),{code:'ENOENT'})
+})
+
+test('launchd may briefly report loaded after accepting bootout', async t => {
+  const f = await fixture(t)
+  const run = f.deps.runner!.run.bind(f.deps.runner)
+  let remaining = 2
+  f.deps.runner = {run:async(file,args,options) => {
+    if (args[0]==='print' && f.state.stops===1 && f.state.boots===0 && remaining-->0) return {code:0,stdout:'',stderr:''}
+    return run(file,args,options)
+  }}
+  const result = await update(f.deps)
+  assert.equal(result.localReady,true)
+  assert.equal(f.state.stops,1)
+  await f.unchanged()
+})
+
+test('same updater recovers a stopping journal after the old daemon has fully exited', async t => {
+  const f = await fixture(t)
+  f.state.installedVersion = '0.1.3'
+  await f.ready('0.1.3')
+  await assert.rejects(update({...f.deps,stopTimeoutMs:10,isProcessAlive:()=>true}),/DAEMON_STOP_TIMEOUT/)
+  const journal = JSON.parse(await readFile(join(f.paths.root,'update-journal.json'),'utf8'))
+  assert.equal(journal.phase,'stopping')
+  assert.equal(journal.oldVersion,'0.1.3')
+  await writeFile(join(f.paths.root,'daemon-status.json'),JSON.stringify({state:'stopped',companionVersion:'0.1.3',pid:f.state.activePid,deviceId:f.config.deviceId}),{mode:0o600})
+  await rm(join(f.paths.root,'daemon.lock'),{recursive:true,force:true})
+  await assert.rejects(lstat(join(f.paths.root,'daemon.lock.reclaim')),{code:'ENOENT'})
+  f.deps.version='0.1.4'
+  const result=await update(f.deps)
+  assert.equal(result.recovered,true)
+  assert.equal(result.localReady,true)
+  assert.equal(await readFile(f.paths.bundle,'utf8'),NEW)
+  await assert.rejects(lstat(join(f.paths.root,'update-journal.json')),{code:'ENOENT'})
+  await f.unchanged()
+})
+
+test('a different lock owner appearing while waiting is never reclaimed', async t => {
+  const f = await fixture(t)
+  await f.ready()
+  let changed=false
+  f.deps.isProcessAlive = () => {
+    if (!f.state.loaded && !changed) { changed=true; setImmediate(()=>fs.writeFileSync(join(f.paths.root,'daemon.lock','nonce'),randomUUID())) }
+    return true
+  }
+  await assert.rejects(update(f.deps),/DAEMON_LOCK_UNVERIFIABLE/)
+  assert.equal(f.state.boots,0)
+  assert.equal(await readFile(f.paths.bundle,'utf8'),OLD)
+  assert.ok((await lstat(join(f.paths.root,'daemon.lock'))).isDirectory())
+  await f.unchanged()
+})
+
+test('unregistration timeout retains the original program and reports a specific reason', async t => {
+  const f = await fixture(t)
+  const run=f.deps.runner!.run.bind(f.deps.runner)
+  f.deps.runner={run:async(file,args,options)=>{
+    if(args[0]==='print' && f.state.stops>0) return {code:0,stdout:'',stderr:''}
+    return run(file,args,options)
+  }}
+  await assert.rejects(update({...f.deps,stopTimeoutMs:10}),/STOP_REGISTRATION_TIMEOUT/)
+  assert.equal(f.state.stops,1)
+  assert.equal(f.state.boots,0)
+  assert.equal(await readFile(f.paths.bundle,'utf8'),OLD)
+  assert.equal(JSON.parse(await readFile(join(f.paths.root,'update-journal.json'),'utf8')).phase,'stopping')
   await f.unchanged()
 })
 
