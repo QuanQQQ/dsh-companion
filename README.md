@@ -11,7 +11,7 @@ Mac 127.0.0.1:5173 → SSH → devbox 127.0.0.1:5173
 ## 交付与兼容边界
 
 - `packages/plugin`：`dsh-companion`，Host、Task Services 卡片和 Companion Devices 设置。只消费 Better Sidebar 的公开 `registerTab` 接口。
-- `packages/cli`：`dsh-companion-cli`，单文件 JS bundle（包含 ws），提供 setup/install、daemon、status、restart、uninstall。
+- `packages/cli`：`dsh-companion-cli`，单文件 JS bundle（包含 ws），提供 setup/install、update、daemon、status、restart、uninstall。
 - CLI 要求 macOS 和**外部安装的 Node.js 22+**。没有附带原生 Node 运行时，没有 codesign/notarization，不是无需运行时的独立 App。
 - Host 管理接口要求 DSH 的公开 `connection.requestRejection` 登录契约；已在 DSH 0.1.2-rc.1 隔离实例验证。缺失契约时返回 503，而不是降级为匿名管理。
 - Task Workspace 必须由 DSH profile 单独安装并提供公开 HTTP Task API；它不是本包的 JavaScript 模块依赖，也不要求其名称已发布到 npm。Better Sidebar 是卡片容器；其公开 0.13.1 类型是固定开发依赖，源码构建不依赖工作区外的参考目录。
@@ -33,7 +33,15 @@ node "$HOME/Downloads/dsh-companion.mjs" setup --server https://dsh.example.inte
 
 HTTP 只默认允许 loopback。非 loopback 的 HTTP 需要明确 `--allow-insecure-http`，此时凭证在网络上是明文，仅供可信测试网络使用。不自动忽略 HTTPS 证书错误。
 
-setup/install 是初装而不是升级：遇到已存在或不完整安装会拒绝覆盖。失败会尝试回滚本地资源；远端 ticket 可能已消费、Device 可能已创建，需要在 DSH 撤销后重新配对。保留恢复材料的部分回滚错误不能忽略。
+首次 setup/install 完成安装和配对。0.1.3 起，重跑 setup 且 Host、SSH alias、指定 Node 路径与已有配置相同时，会自动转为原位更新，不再请求配对码。配置不一致或安装不完整会拒绝覆盖。初装失败可能已消费远端 ticket、创建 Device，需要在 DSH 撤销后重新配对；更新则不会触及配对或 Keychain。
+
+以后只需下载新版覆盖 Downloads 中的旧文件，再运行同一条命令：
+
+```bash
+node "$HOME/Downloads/dsh-companion.mjs" update
+```
+
+update 自动校验、暂存、停止并替换后台程序，再启动原 LaunchAgent；常规失败尝试回滚，保留配对、配置、Lease 状态和重试预算。更新会短暂中断此 Mac 的转发。无需手工复制 Library 文件或操作 launchctl；异常恢复边界见 [一键更新说明](docs/macos-cli-update.md)。
 
 ## Task Services
 

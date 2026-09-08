@@ -4,6 +4,26 @@ import { createPairingTicket, listDevices, revokeDevice, type DeviceDto } from '
 
 function shellQuote(value: string): string { return "'" + value.replaceAll("'", "'\\''") + "'" }
 
+async function copyText(text: string): Promise<void> {
+  try {
+    if (navigator.clipboard?.writeText) { await navigator.clipboard.writeText(text); return }
+  } catch { /* Local HTTP development origins may not expose the Clipboard API. */ }
+  const previous = document.activeElement
+  const input = document.createElement('textarea')
+  input.value = text
+  input.readOnly = true
+  input.style.position = 'fixed'
+  input.style.opacity = '0'
+  document.body.appendChild(input)
+  try {
+    input.select()
+    if (!document.execCommand('copy')) throw new Error('Clipboard unavailable')
+  } finally {
+    input.remove()
+    if (previous instanceof HTMLElement) previous.focus()
+  }
+}
+
 export function DeviceSettings({ close }: SettingsSectionOwnerProps) {
   const [devices, setDevices] = useState<DeviceDto[]>([])
   const [loading, setLoading] = useState(true)
@@ -11,6 +31,8 @@ export function DeviceSettings({ close }: SettingsSectionOwnerProps) {
   const [ticket, setTicket] = useState<{ code: string; expiresAt: string }>()
   const [sshAlias, setSshAlias] = useState('YOUR_SSH_ALIAS')
   const [copied, setCopied] = useState(false)
+  const [updateCopied, setUpdateCopied] = useState(false)
+  const updateCommand = 'node "$HOME/Downloads/dsh-companion.mjs" update'
   const [serverOrigin, setServerOrigin] = useState(() => window.location.origin)
   const [allowHttp, setAllowHttp] = useState(false)
   const [preferred, setPreferred] = useState(() => window.localStorage.getItem('dsh-companion.preferred-device') ?? '')
@@ -38,9 +60,18 @@ export function DeviceSettings({ close }: SettingsSectionOwnerProps) {
     catch (caught) { setError((caught as Error).message) }
   }
   const copyCommand = async () => {
-    await navigator.clipboard.writeText(command)
-    setCopied(true)
-    window.setTimeout(() => setCopied(false), 1_500)
+    try {
+      await copyText(command)
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1_500)
+    } catch { setError('复制失败，请直接复制下方安装命令。') }
+  }
+  const copyUpdateCommand = async () => {
+    try {
+      await copyText(updateCommand)
+      setUpdateCopied(true)
+      window.setTimeout(() => setUpdateCopied(false), 1_500)
+    } catch { setError('复制失败，请直接复制下方更新命令。') }
   }
   const setPreferredDevice = (deviceId: string) => {
     window.localStorage.setItem('dsh-companion.preferred-device', deviceId)
@@ -65,6 +96,13 @@ export function DeviceSettings({ close }: SettingsSectionOwnerProps) {
       </article>)}</div>
     </section>
 
+    <section className="dco-pairing" aria-label="更新 Companion">
+      <div><span className="dco-eyebrow">ONE-COMMAND UPDATE</span><h4>已安装？一条命令更新</h4><p>先下载新版并覆盖 Downloads 中的旧文件，再运行同一条命令。保留配对、配置和 Lease 状态；更新会短暂停止此 Mac 的转发，替换失败时自动尝试回滚。</p></div>
+      <div className="dco-pair-actions"><a className="dco-button" href="/api/companion/downloads/cli.mjs" download="dsh-companion.mjs">下载新版 CLI</a><button className="dco-button dco-primary" onClick={() => void copyUpdateCommand()}>{updateCopied ? '已复制更新命令' : '复制更新命令'}</button></div>
+      <pre><code>{updateCommand}</code></pre>
+      <div className="dco-safety">无需新配对码、sudo 或手工操作 LaunchAgent。也可重跑原 setup 命令：匹配已有设置时会自动转入更新。更新不改变 Host 或 SSH alias。</div>
+    </section>
+
     {ticket && <section className="dco-pairing">
       <div><span className="dco-eyebrow">ONE-COMMAND SETUP</span><h4>在目标 Mac 的 Terminal 运行</h4><p>配对码单次有效，{new Date(ticket.expiresAt).toLocaleTimeString()} 到期。SSH alias 只留在 Mac，不会发送给 Host。</p></div>
       <label>本机 SSH alias<input value={sshAlias} onChange={event => setSshAlias(event.target.value)} spellCheck={false}/></label>
@@ -74,7 +112,7 @@ export function DeviceSettings({ close }: SettingsSectionOwnerProps) {
       <pre><code>{command}</code></pre>
       <p>终端提示时输入一次性配对码（不进入命令行参数）：<code>{ticket.code}</code></p>
       <div className="dco-pair-actions"><button className="dco-button dco-primary" onClick={() => void copyCommand()}>{copied ? '已复制' : '复制一键命令'}</button><button className="dco-button" onClick={() => void createTicket()}>重新生成</button></div>
-      <div className="dco-safety">setup 会把固定 CLI bundle 复制到 <code>~/Library/Application Support/DSH Companion/</code>，把 token 存入 macOS Keychain，并安装用户 LaunchAgent。不会修改 Bifrost 或系统代理。</div>
+      <div className="dco-safety">首次 setup 会把固定 CLI bundle 复制到 <code>~/Library/Application Support/DSH Companion/</code>，把 token 存入 macOS Keychain，并安装用户 LaunchAgent。不会修改 Bifrost 或系统代理。</div>
     </section>}
     {error && <div className="dco-error-banner">{error}</div>}
   </div>

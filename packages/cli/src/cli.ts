@@ -1,17 +1,21 @@
 import { createInterface } from 'node:readline/promises'
+import { realpath } from 'node:fs/promises'
+import { companionPaths, normalizeServerUrl, readConfig, validateSshHost } from './config.js'
 import { Writable } from 'node:stream'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { setup, status, uninstall, type LifecycleDependencies } from './setup.js'
 import { restartLaunchAgent } from './launchd.js'
 
-export const VERSION = '0.1.2'
-export const HELP = 'Usage: dsh-companion <setup|install|daemon|status|restart|uninstall>\n' +
+import { VERSION } from './version.js'
+export { VERSION } from './version.js'
+export const HELP = 'Usage: dsh-companion <setup|install|update|daemon|status|restart|uninstall>\n' +
   '  setup (install is an alias) --server https://HOST --ssh-host SSH_ALIAS [--name NAME]\n' +
   '    [--node /absolute/path/to/node] [--allow-insecure-http] [--pair-code-stdin]\n' +
-  '  Pair code is read from stdin, or a hidden TTY prompt; never pass it in argv.\n' +
+  '  First setup reads a hidden pairing code; repeat setup with matching settings updates without re-pairing.\n' +
   '  Requires macOS and an externally installed Node.js 22+; no native runtime is bundled.\n' +
-  '  Existing/partial installations are not overwritten. Uninstall locally, then revoke Device in DSH.\n' +
+  '  update uses this downloaded bundle, preserving pairing/configuration and rolling back a failed replacement.\n' +
+  '  Update briefly interrupts Companion forwards; missing or unverifiable installations fail safely.\n' +
   '  status reports local installation/launchctl state, not Host connectivity.\n'
 
 export interface CliDependencies extends LifecycleDependencies {
@@ -19,6 +23,7 @@ export interface CliDependencies extends LifecycleDependencies {
   stdout?: (text: string) => void
   stderr?: (text: string) => void
   runDaemon?: () => Promise<void>
+  runUpdate?: (deps: LifecycleDependencies) => Promise<{ version: string; changed: boolean; note?: string }>
 }
 
 export async function main(argv = process.argv.slice(2), deps: CliDependencies = {}): Promise<number> {
@@ -26,10 +31,29 @@ export async function main(argv = process.argv.slice(2), deps: CliDependencies =
   const err = deps.stderr ?? (text => { process.stderr.write(text) })
   if (argv.length === 0 || argv[0] === '--help' || argv[0] === 'help' || argv[1] === '--help') { out(HELP); return 0 }
   if (argv.length === 1 && argv[0] === '--version') { out('dsh-companion ' + VERSION + '\n'); return 0 }
+  const performUpdate = async () => {
+    out('Checking local update; pairing is preserved and Companion forwards may pause briefly.\n')
+    const result = await (deps.runUpdate ?? (async d => (await import('./update.js')).update(d)))(deps)
+    out((result.changed ? 'Updated Companion to ' : 'Companion already matches ') + result.version + '; pairing and configuration preserved.\n')
+    if (result.note) out(result.note + '\n')
+  }
   try {
     const command = argv[0]
     if (command === 'setup' || command === 'install') {
       const options = parseSetupArgs(argv.slice(1))
+      let existing
+      try { existing = await readConfig((deps.paths ?? companionPaths()).config) }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+      if (existing) {
+        if (normalizeServerUrl(options.serverUrl, options.allowInsecureHttp) !== existing.serverUrl ||
+            validateSshHost(options.sshHost) !== existing.sshHost ||
+            (options.runtimePath !== undefined && await realpath(options.runtimePath) !== existing.runtimePath)) {
+          throw new Error('Existing pairing settings differ; update preserves the existing Host, SSH alias and Node runtime. Use update without setup options.')
+        }
+        out('Existing installation detected; updating in place without a new pairing code.\n')
+        await performUpdate()
+        return 0
+      }
       const code = await (deps.readPairCode ?? readPairCode)(options.stdinOnly)
       const config = await setup({ ...options, pairCode: code }, deps)
       out('Installed Device ' + config.deviceId + ' with external Node.js runtime ' + config.runtimePath + '\n')
@@ -39,6 +63,10 @@ export async function main(argv = process.argv.slice(2), deps: CliDependencies =
         case 'daemon': {
           if (deps.runDaemon) await deps.runDaemon()
           else { const { runDaemon } = await import('./daemon.js'); await runDaemon() }
+          break
+        }
+        case 'update': {
+          await performUpdate()
           break
         }
         case 'status': out(JSON.stringify(await status(deps), null, 2) + '\n'); break

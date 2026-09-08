@@ -1,44 +1,38 @@
-# 将已安装的 Mac Companion 更新到 0.1.2
+# 一键更新已安装的 Mac Companion
 
-适用于已完成 setup、后台 LaunchAgent 已加载的 0.1.0/0.1.1 安装。0.1.2 修复 OpenSSH 默认混合大小写键名导致的 SSH_CONFIG_UNSAFE。无需修改 SSH 配置。
+从包含 update 命令的新版下载包（0.1.3 起）更新已安装的 Companion，包括 0.1.0–0.1.2。无需先卸载、重新配对或手工操作 LaunchAgent。
 
-## 下载与更新
+## 唯一更新命令
 
-先从隔离 DSH 的 Companion Devices 页面重新下载 CLI，保存为 `~/Downloads/dsh-companion.mjs`，覆盖旧下载。不要重新执行 setup 或 uninstall；setup 不负责升级，uninstall 会删除本地配对凭证。
-
-下面操作会短暂停止此 Mac 的 Companion 和它负责的转发。它只替换固定 CLI bundle，保留 Keychain、config.json、runtime-state.json 和原 LaunchAgent plist，不修改代理或 SSH 配置。旧 bundle 会保留为唯一命名的备份。
-
-在 Mac Terminal 执行，不使用 sudo：
+在 DSH → Companion Devices 的“更新 Companion”区域下载新版 CLI，覆盖 `~/Downloads/dsh-companion.mjs`，然后在 Mac 运行：
 
 ```bash
-(
-  set -e
-  src="$HOME/Downloads/dsh-companion.mjs"
-  app="$HOME/Library/Application Support/DSH Companion"
-  [ "$(node "$src" --version)" = "dsh-companion 0.1.2" ] || { echo "请先下载 0.1.2 CLI"; exit 1; }
-  [ -f "$app/dsh-companion.mjs" ] && [ ! -L "$app/dsh-companion.mjs" ]
-  backup="$(mktemp "$app/cli-backup.XXXXXX")"
-  staged="$(mktemp "$app/cli-update.XXXXXX")"
-  trap 'rm -f "$staged"' EXIT
-  cp "$app/dsh-companion.mjs" "$backup"
-  cp "$src" "$staged"
-  chmod 700 "$staged"
-  printf '旧程序备份：%s\n' "$backup"
-  /bin/launchctl bootout "gui/$(id -u)/dev.deepseek.dsh-companion"
-  mv "$staged" "$app/dsh-companion.mjs"
-  /bin/launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/dev.deepseek.dsh-companion.plist"
-)
+node "$HOME/Downloads/dsh-companion.mjs" update
 ```
 
-任一步失败都会停止后续步骤。若出现错误，保留输出和备份并停止，不要删除 Keychain、手工删除锁、重复配对或跳过失败的停止操作。若 bootstrap 失败，磁盘上的新版与旧备份仍在，但后台服务可能未运行，需要单独诊断。
+每次更新都使用这条命令。update 使用正在执行的下载包，不从未知地址自动获取或执行代码；只重启旧安装路径的程序不会更新软件。
 
-## 验证
+也可以重跑最初的 setup 命令：CLI 检测到已有配置且 Host、SSH alias、指定 Node 路径相同时，自动转入 update，不再要求新配对码。参数与旧配对不符时会拒绝，不能通过更新静默切换 Host 或 SSH alias。
+
+## 自动处理
+
+- 校验完整安装、私有文件、原 LaunchAgent plist 和已保存的 Node.js 22+ 运行时。
+- 在停止前暂存并验证新版；内容相同且没有待恢复事务时不重复替换或重启。
+- 停止固定用户 LaunchAgent，确认 daemon 停止后原子替换 bundle，再启动原 LaunchAgent，并等待目标版本的新本地启动标识。不会只凭 launchctl 返回 0 宣称新版已启动。
+- 保留 Device 身份、Keychain、配置、原 Lease 到期时间和持久重试预算；不读写 SSH 配置或代理设置。
+- 更新期间会短暂停止此 Mac 的转发。本地启动成功不等于 WSS 已在线；等待页面的 Device 在线后，如服务仍需处理，点击“重新检查”。
+
+## 失败与恢复
+
+常规替换或启动失败会尝试恢复旧 bundle 并重新启动旧服务。无法确认停止或回滚失败时保留备份和更新记录，输出具体错误，不强行覆盖、删除凭证或按未知 PID 杀进程。正常错误退出后，可再次运行同一条 update 命令处理待恢复事务。
+
+SIGKILL、断电或文件被外部改动可能留下无法证明归属的 `.install.lock` / `daemon.lock.reclaim`。这类异常会安全停止并要求检查，不自动删除不明锁；不承诺所有系统级故障都可无人工恢复。待恢复更新记录存在时，setup/uninstall 不会破坏它。
+
+## 查看版本
 
 ```bash
 node "$HOME/Library/Application Support/DSH Companion/dsh-companion.mjs" --version
 node "$HOME/Library/Application Support/DSH Companion/dsh-companion.mjs" status
 ```
 
-固定安装路径的版本应为 `dsh-companion 0.1.2`。等待页面显示 Device 在线，再点服务卡片的“重新检查”。该动作不会延长原 Lease 的到期时间。若 Lease 已到期，需由用户重新授权创建新 Lease。
-
-上述更新步骤是用户在 Mac 上显式执行的运维流程，不是自动升级器；尚未在本次 Linux 会话中执行真实 launchctl 操作。
+本地 loaded/status 不代表 SSH 或远端应用健康。真实 macOS launchctl 行为仍以实机验收结果为准。

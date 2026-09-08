@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { absoluteRuntimePath, companionPaths, createInstallationId, normalizeServerUrl, readConfig, validateSshHost, writeConfig, type CompanionConfig, type CompanionPaths } from './config.js'
 import { systemCommandRunner, type CommandRunner } from './command.js'
 import { MacKeychain } from './keychain.js'
+import { VERSION } from './version.js'
 import { currentUid, installBundle, installLaunchAgent, launchAgentStatus, stopLaunchAgent } from './launchd.js'
 
 export interface CredentialStore {
@@ -56,6 +57,7 @@ export async function setup(options: SetupOptions, deps: LifecycleDependencies =
   if (!source.endsWith('.mjs')) throw new Error('Run setup from the built single .mjs bundle, not TypeScript source')
   await access(source, constants.R_OK)
   return withInstallLock(d.paths, async () => {
+    if (await exists(join(d.paths.root, 'update-journal.json'))) throw new Error('An interrupted update needs recovery; run update from the downloaded CLI before setup')
     for (const path of [d.paths.config, d.paths.bundle, d.paths.launchAgent, d.paths.runtimeState, join(d.paths.root, 'daemon-status.json'), join(d.paths.root, 'daemon.lock'), join(d.paths.root, 'daemon.lock.reclaim')]) {
       if (await exists(path)) throw new Error('Existing or partial Companion installation found; setup will not overwrite it. Inspect status and uninstall explicitly first')
     }
@@ -120,6 +122,7 @@ export async function uninstall(deps: LifecycleDependencies = {}): Promise<void>
   const d = dependencies(deps)
   requireMac(d.platform)
   await withInstallLock(d.paths, async () => {
+    if (await exists(join(d.paths.root, 'update-journal.json'))) throw new Error('An interrupted update needs recovery; run update from the downloaded CLI before uninstall')
     const config = await readConfig(d.paths.config)
     await stopLaunchAgent(d.paths, d.runner, d.uid)
     await withStoppedDaemonLock(d.paths, d.uid, d.isProcessAlive, async () => {
@@ -145,7 +148,7 @@ export async function status(deps: LifecycleDependencies = {}): Promise<Record<s
     note: 'Persisted daemon observation may be stale; loaded does not mean connected. Restart preserves reconnect budget.' }
 }
 
-async function withStoppedDaemonLock<T>(paths: CompanionPaths, uid: number, alive: (pid: number) => boolean, action: () => Promise<T>): Promise<T> {
+export async function withStoppedDaemonLock<T>(paths: CompanionPaths, uid: number, alive: (pid: number) => boolean, action: () => Promise<T>): Promise<T> {
   const recovery = 'Daemon lock ownership or liveness is uncertain; installation retained. Inspect daemon.lock and daemon.lock.reclaim for manual recovery'
   const root = await lstat(paths.root)
   if (!root.isDirectory() || root.isSymbolicLink() || root.uid !== uid || (root.mode & 0o077) !== 0) throw new Error(recovery)
@@ -195,10 +198,12 @@ async function readDaemonObservation(path: string, deviceId?: string): Promise<R
     const raw: unknown = JSON.parse(await readFile(path, 'utf8'))
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { state: 'invalid' }
     const value = raw as Record<string, unknown>
-    const states = ['connected', 'reconnecting', 'needs_attention', 'cleanup_failed', 'stopped', 'starting', 'connecting']
+    const states = ['ready', 'connected', 'reconnecting', 'needs_attention', 'cleanup_failed', 'stopped', 'starting', 'connecting']
     if (value.deviceId !== deviceId || typeof value.state !== 'string' || !states.includes(value.state)) return { state: 'invalid_or_different_device' }
     return { state: value.state, reconnectAttempts: Number.isSafeInteger(value.reconnectAttempts) ? value.reconnectAttempts : null,
       pid: Number.isSafeInteger(value.pid) ? value.pid : null,
+      ...(typeof value.companionVersion === 'string' && /^[0-9]+\.[0-9]+\.[0-9]+$/.test(value.companionVersion) ? { companionVersion: value.companionVersion } : {}),
+      ...(typeof value.bootId === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value.bootId) ? { bootId: value.bootId } : {}),
       updatedAt: typeof value.updatedAt === 'string' && Number.isFinite(Date.parse(value.updatedAt)) ? new Date(value.updatedAt).toISOString() : null }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
@@ -227,11 +232,11 @@ function required(value: unknown, field: string, limit: number): string {
   if (typeof value !== 'string' || !value || value.length > limit || /[\x00-\x1f\x7f]/.test(value)) throw new Error('Invalid ' + field)
   return value
 }
-function dependencies(deps: LifecycleDependencies) {
+export function dependencies(deps: LifecycleDependencies) {
   const runner = deps.runner ?? systemCommandRunner
   return { paths: deps.paths ?? companionPaths(), runner, keychain: deps.keychain ?? new MacKeychain(runner),
     fetch: deps.fetch ?? globalThis.fetch, bundleSource: deps.bundleSource ?? fileURLToPath(import.meta.url),
-    platform: deps.platform ?? process.platform, uid: deps.uid ?? currentUid(), version: deps.version ?? '0.1.2',
+    platform: deps.platform ?? process.platform, uid: deps.uid ?? currentUid(), version: deps.version ?? VERSION,
     isProcessAlive: deps.isProcessAlive ?? processAlive }
 }
 function requireMac(platform: NodeJS.Platform): void {
@@ -241,7 +246,7 @@ async function exists(path: string): Promise<boolean> {
   try { await lstat(path); return true }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error }
 }
-async function withInstallLock<T>(paths: CompanionPaths, action: () => Promise<T>): Promise<T> {
+export async function withInstallLock<T>(paths: CompanionPaths, action: () => Promise<T>): Promise<T> {
   await mkdir(paths.root, { recursive: true, mode: 0o700 })
   const path = join(paths.root, '.install.lock')
   let lock

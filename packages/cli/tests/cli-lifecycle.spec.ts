@@ -95,6 +95,76 @@ test('exit 113 is print-specific and does not loosen bootout safety', async t =>
   await assert.rejects(stopLaunchAgent(f.paths, runner, 501), /installation retained/)
 })
 
+test('CLI update dispatches without requesting a pairing code', async () => {
+  let updates = 0
+  let output = ''
+  const result = await main(['update'], {
+    runUpdate: async () => { updates++; return { version: '0.1.3', changed: true } },
+    readPairCode: async () => { throw new Error('update must not ask for pairing') },
+    stdout: text => { output += text }, stderr: () => {},
+  })
+  assert.equal(result, 0)
+  assert.equal(updates, 1)
+  assert.match(output, /0.1.3/)
+})
+
+test('repeating setup updates the existing installation without reading or consuming another pairing code', async t => {
+  const f = await fixture(t)
+  await setup(options, f.deps)
+  let updates = 0
+  const result = await main(['setup', '--server', options.serverUrl, '--ssh-host', options.sshHost], {
+    ...f.deps,
+    runUpdate: async () => { updates++; return { version: '0.1.3', changed: true } },
+    readPairCode: async () => { throw new Error('existing setup must not ask for pairing') },
+    stdout: () => {}, stderr: () => {},
+  })
+  assert.equal(result, 0)
+  assert.equal(updates, 1)
+  assert.equal(f.state.requests, 1)
+})
+
+test('update entry rejects extra options and repeated setup cannot silently retarget pairing', async t => {
+  const f = await fixture(t)
+  await setup(options, f.deps)
+  let updates = 0
+  const deps = { ...f.deps, runUpdate: async () => { updates++; return { version: '0.1.3', changed: true } },
+    readPairCode: async () => { throw new Error('must not read another code') }, stdout: () => {}, stderr: () => {} }
+  for (const args of [
+    ['update', '--server', 'https://other.example'],
+    ['setup', '--server', 'https://other.example', '--ssh-host', options.sshHost],
+    ['setup', '--server', options.serverUrl, '--ssh-host', 'other-alias'],
+  ]) assert.equal(await main(args, deps), 1)
+  assert.equal(updates, 0)
+  assert.equal(f.state.requests, 1)
+})
+
+test('uninstall preserves a pending update journal and all pairing material before touching launchd', async t => {
+  const f = await fixture(t)
+  await setup(options, f.deps)
+  await writeFile(join(f.paths.root, 'update-journal.json'), '{}')
+  await assert.rejects(uninstall(f.deps), /interrupted update/)
+  assert.equal(f.calls.filter(call => call.args[0] === 'bootout').length, 0)
+  assert.equal(f.credentials.get('dev_fixture'), token)
+  assert.ok(await stat(f.paths.bundle))
+})
+
+test('status exposes the new local boot identity without leaking other status fields', async t => {
+  const f = await fixture(t)
+  await setup(options, f.deps)
+  const bootId = '12345678-1234-1234-1234-123456789abc'
+  await writeFile(join(f.paths.root, 'daemon-status.json'), JSON.stringify({
+    state: 'ready', deviceId: 'dev_fixture', pid: process.pid, reconnectAttempts: 4,
+    companionVersion: '0.1.3', bootId, updatedAt: new Date().toISOString(), token: 'must-not-leak',
+  }))
+  const result = await status(f.deps)
+  const observed = result.daemonObservation as Record<string, unknown>
+  assert.equal(observed.state, 'ready')
+  assert.equal(observed.companionVersion, '0.1.3')
+  assert.equal(observed.bootId, bootId)
+  assert.equal(observed.reconnectAttempts, 4)
+  assert.ok(!JSON.stringify(result).includes('must-not-leak'))
+})
+
 test('HTTPS mandatory except loopback or explicit insecure HTTP; no credential origins', () => {
   for (const origin of ['http://localhost:3080', 'http://127.0.0.1:3080', 'http://127.0.0.2:3080', 'http://[::1]:3080']) assert.equal(normalizeServerUrl(origin), origin)
   assert.throws(() => normalizeServerUrl('http://remote.example'), /HTTPS/)

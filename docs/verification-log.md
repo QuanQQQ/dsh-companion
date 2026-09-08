@@ -60,3 +60,13 @@ PDM 项目 dsh-companion-package-validation 对干净 Git 归档执行重建/打
 新增混合大小写样本和真实系统 OpenSSH 输出两项端到端执行器测试，均先复现 SSH_CONFIG_UNSAFE，再通过修复。0.1.2 按 SSH 键名不区分大小写的规则归一化键，保持值的大小写和窄白名单；不同大小写的重复 HostName 仍拒绝。CLI 77 项、Plugin 39 项测试、类型检查和打包全部通过。真实 ssh -G 运行于 Linux；隧道 spawn 和归属证据仍是测试替身，不声称 Mac 真实隧道已建立。
 
 隔离页面已刷新，下载返回 200，版本 0.1.2，SHA-256 与本地构建一致：af4dd107adbb9ac01657610f86e7d4e7b93111bf088070af3773a0bcb8ac5c48。现有安装需保留配对地替换固定 Library bundle；仅重新下载不会更新 LaunchAgent 使用的程序。手动更新步骤见 macos-cli-update.md。稳定 DSH 未变更；用户 Mac 更新后转发是否成功仍待确认。
+
+## 2026-09-08：0.1.3 标准一键更新
+
+用户明确拒绝每个版本手工复制 Library 文件和操作 launchctl 的流程。新增 update 子命令，下载新版后固定执行 node "$HOME/Downloads/dsh-companion.mjs" update。重复 setup 且已有设置一致也会转入更新，不再请求或消费配对码。Companion Devices 新增独立下载/复制更新命令区域，无需生成 ticket。
+
+更新器检查私有安装、精确 plist 契约、保存 Node 运行时及安装/候选版本，拒绝降级；暂存和备份后停止已知 LaunchAgent，在 daemon 停止锁内原子替换，启动后检查新版的新 bootId、Device、版本、活 PID 和私有 daemon.lock。本地 ready 不等于 WSS 或隧道在线。替换/启动失败安全回滚；不能确认停止时保留备份和绑定安装身份、哈希的 journal。旧版 0.1.0–0.1.2 回滚只证明 launchctl 注册；极端 SIGKILL 遗留不明锁不自动删除。updater 不写 Keychain/config/runtime-state；实际 daemon 停启可更新 observations，但不由更新器重置预算。
+
+23 项新增更新器测试包括正常更新、同内容幂等、磁盘新版但后台旧版修复、未注册恢复、版本探测失败/降级拒绝、停止失败、原子替换失败回滚、bootstrap/ready 失败回滚、恢复材料保留、7 类无效 ready、原子状态文件替换竞争、并发锁、symlink/模式/归属检查。全量 CLI 105 项、Plugin 39 项通过，类型检查和打包通过；打包 CLI 的 update 分派在 Linux 安全拒绝 macOS 生命周期操作。
+
+刷新现有隔离 GUI，更新面板不依赖 ticket 显示；复制按钮出现成功反馈。读取浏览器剪贴板的自动化请求因权限未完成而超时，已通过导航取消，不宣称验证真实 Mac 剪贴板。下载返回 200，版本 0.1.3，包含完整 updater，SHA-256 与本地构建一致：6c86aaad31cc8cab859c765adc83a301c337e44d5ebe8c5e5e05da2851c2ef4c。真实 Mac 更新仍待用户执行确认。未改 Better Sidebar 源码，未更新或重启稳定 DSH。

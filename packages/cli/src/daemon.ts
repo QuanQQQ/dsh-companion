@@ -1,4 +1,6 @@
 import { readFile } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
+import { VERSION } from './version.js'
 import { daemonLock } from './daemon-lock.js'
 import { join } from 'node:path'
 import { WebSocket, type RawData } from 'ws'
@@ -12,6 +14,7 @@ import { encodeDeviceFrame, parseHostFrame, type Fence, type DeviceFrame } from 
 /** No SSH tunnel is retained after the authenticated control channel is lost. */
 export async function runDaemon(): Promise<void> {
   if (process.platform !== 'darwin') throw new Error('The Companion daemon requires macOS')
+  const bootId = randomUUID()
   const paths = companionPaths()
   const config = await readConfig(paths.config)
   const unlock = await daemonLock(join(paths.root, 'daemon.lock'))
@@ -36,7 +39,7 @@ export async function runDaemon(): Promise<void> {
   const done = new Promise<void>(resolve => { finish = resolve })
   const status = (state: string) => {
     statusTail = statusTail.then(() => atomicPrivateWrite(statusFile, JSON.stringify({
-      state, reconnectAttempts: attempts, deviceId: config.deviceId, pid: process.pid,
+      state, reconnectAttempts: attempts, deviceId: config.deviceId, pid: process.pid, companionVersion: VERSION, bootId,
       updatedAt: new Date().toISOString(),
     }) + '\n'))
     return statusTail
@@ -100,7 +103,7 @@ export async function runDaemon(): Promise<void> {
           fence = { authorityEpoch: frame.authorityEpoch, sessionEpoch: frame.sessionEpoch }
           connectedAt = Date.now()
           heartbeatMs = frame.heartbeatMs
-          send(ws, { v: 1, type: 'device.hello', ...fence, companionVersion: '0.1.2' })
+          send(ws, { v: 1, type: 'device.hello', ...fence, companionVersion: VERSION })
           void status('connected').catch(() => settle(true))
           return
         }
@@ -156,6 +159,7 @@ export async function runDaemon(): Promise<void> {
   process.on('SIGHUP', retry)
   try {
     await controller.initialize()
+    await status('ready')
     await connect().catch(() => status('needs_attention'))
     await done
     await status('stopped')
