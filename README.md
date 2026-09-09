@@ -71,19 +71,21 @@ status 包含本地持久快照，不是实时健康证明。restart 只重启�
 
 用户数据：`~/Library/Application Support/DSH Companion/`；日志：`~/Library/Logs/DSH Companion/`；LaunchAgent：`~/Library/LaunchAgents/dev.deepseek.dsh-companion.plist`。卸载先停止自有 LaunchAgent，再删除本地凭证/配置/bundle/runtime 状态，保留日志/control 目录；**不会代替 DSH 中的 Device 撤销**。
 
-SSH alias 只支持字母/数字/点/横线/下划线，不支持任意 `user@host`。执行器读取可信本机 `ssh -G` 配置后只复制窄白名单到私有配置，包括 GSSAPIAuthentication 和受限的 PreferredAuthentications。`Match exec` 属于用户本机 SSH 配置求值的信任边界。
+SSH alias 只支持字母/数字/点/横线/下划线，不支持任意 `user@host`。用户在 Mac 选择本机已有 alias；系统 OpenSSH 原生读取用户与系统 SSH 配置，处理 Include、Match、ProxyCommand、ProxyJump、密钥、Agent、GSSAPI 和 KnownHostsCommand。Companion 不运行 ssh -G，不解析或重写配置，不识别 Kerberos 模板，也不直接调用 klist/kinit。
 
-从 0.1.7 起，识别以下固定的 Kerberos 取票后直连模板（principal 从可信本机配置中取得，不能由 Host 下发）：
+连接/认证语义复用用户手动 SSH 的配置，但后台转发角色有明确边界：
 
-```sshconfig
-ProxyCommand bash -lc '/usr/bin/klist -s || /usr/bin/kinit -k -t ~/.keytab user@EXAMPLE.COM; exec nc %h %p'
-```
+- 独立的 foreground master 和私有 ControlPath，不复用、接管或关闭用户已有 master。
+- BatchMode、无 TTY、无远程命令及 LocalCommand、Agent/X11/TUN 转发；主连接严格校验 Host Key。需要首次登录或交互认证时，先在 Mac 终端完成认证。
+- 主连接用 ClearAllForwardings 清除其配置中的 LocalForward/RemoteForward/DynamicForward；认证后通过不读取配置的控制请求，仅添加 Lease 指定的同端口 IPv4 loopback 转发。ClearAllForwardings 也会清除 CLI 的 -L，因此连接和添加 listener 分成两步。
+- 控制响应不单独证明成功：还必须验证私有 socket、master PID 及该 PID 的唯一指定 listener。默认总启动期限 30 秒；失败或取消须先完成清理。
+- 正常停止向当前存活、由本执行器创建的独立进程组发送 TERM，必要时 KILL。master 已退出后不再按其旧 PGID 发信号；无法确认退出时保留证据并报告清理失败。崩溃恢复只向已验证的私有 control socket 发送 exit，不按磁盘保存的 PID/PGID 强杀进程；V2 记录允许回收认证完成但尚未添加 listener 的 master。
 
-该模板不会作为 shell 执行：Companion 以固定 argv 调用系统 klist，必要时调用 kinit，然后让 SSH 直接连接解析出的 HostName/Port。也接受 `/bin/bash` 和 `/usr/bin/nc` 的对应写法。系统 kinit 使用现有 keytab；Companion 不读取、保存或上传其内容。每个认证命令默认最多 5 秒，且受整体启动期限约束。已有有效票据不会重复 kinit；失败输出脱敏的 SSH_KERBEROS_FAILED、SSH_KERBEROS_TIMEOUT 或 SSH_KERBEROS_UNAVAILABLE。
-
-不执行 login-shell profile、不继承其中的额外环境初始化、不运行 nc，也不接受任意 ProxyCommand、ProxyJump、自定义 keytab 路径、shell 替换或追加命令。此适配仅覆盖固定模板的取票与直连语义，并非完整 shell 兼容层。SSH 仍禁用 ProxyCommand/ProxyJump、Agent/X11 转发及 GSSAPI 凭证委派，强制 Host Key 校验及同端口 IPv4 loopback listener。需要其他跳板/代理的环境必须单独设计。
+用户的本机 SSH 配置属于可信代码：其中的 ProxyCommand、Match exec 等可以像手动 SSH 一样运行本机程序，并有其自身副作用。Host 无权下发这类配置或命令。Companion 不承诺约束自定义脚本主动 daemonize、脱离进程组或管理外部服务的行为，也不替用户管理脚本启动的独立后台服务。这是原生 SSH 兼容，不是脚本沙箱。
 
 ## 构建与测试
+
+Linux 原生集成测试需要系统 openssh-server、ssh-keygen 和 lsof；测试创建临时 loopback sshd 与临时密钥，不使用个人 SSH 密钥或修改 ~/.ssh/config。Mac 跳过这组 Linux 隔离测试，真实 Mac 转发另行验收。
 
 ```bash
 pnpm install --frozen-lockfile

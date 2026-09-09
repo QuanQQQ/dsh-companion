@@ -2,7 +2,6 @@ import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
-import { homedir } from 'node:os'
 
 export interface SshCommandResult { code: number; stdout: string; stderr: string }
 export interface SshRunOptions { shell: false; signal: AbortSignal; maxOutputBytes: number }
@@ -11,14 +10,15 @@ export interface SshRunner {
   run(file: string, args: readonly string[], options: SshRunOptions): Promise<SshCommandResult>
 }
 export type SshSpawn = (file: string, args: readonly string[], options: {
-  shell: false; stdio: ['ignore', 'pipe', 'pipe']
+  shell: false; stdio: ['ignore', 'pipe', 'pipe']; detached?: boolean
 }) => ChildProcess
 export interface SshExecutorOptions {
   runner?: SshRunner
   spawn?: SshSpawn
+  /** Signals only a live, detached master created by this executor. Test spawns must inject this too. */
+  signalGroup?: (child: ChildProcess, signal: 'SIGTERM' | 'SIGKILL') => void
   startupTimeoutMs?: number
   commandTimeoutMs?: number
-  authenticationTimeoutMs?: number
   terminateTimeoutMs?: number
   pollIntervalMs?: number
   maxInstances?: number
@@ -42,17 +42,17 @@ interface Instance {
   stopPromise?: Promise<void>
 }
 interface Pending { cancelled: boolean; promise: Promise<{ pid: number; controlPath: string }> }
-interface Owner { leaseId: string; sshHost: string; pid: number; port: number; controlPath: string }
+interface Owner { version?: 2; leaseId: string; sshHost: string; pid: number; port: number; controlPath: string }
 const SSH = '/usr/bin/ssh'
 const LSOF = process.platform === 'darwin' ? '/usr/sbin/lsof' : '/usr/bin/lsof'
 const MAX_COMMAND_OUTPUT = 256 * 1024
 const SECURITY_OPTIONS = [
-  'BatchMode=yes', 'StrictHostKeyChecking=yes', 'UpdateHostKeys=no', 'VerifyHostKeyDNS=no',
-  'GSSAPIDelegateCredentials=no', 'ForwardAgent=no', 'ForwardX11=no', 'ForwardX11Trusted=no', 'PermitLocalCommand=no',
-  'LocalCommand=none', 'RemoteCommand=none', 'ProxyCommand=none', 'ProxyJump=none',
-  'CanonicalizeHostname=no', 'ControlPersist=no', 'ExitOnForwardFailure=yes',
+  'BatchMode=yes', 'StrictHostKeyChecking=yes',
+  'ForwardAgent=no', 'ForwardX11=no', 'ForwardX11Trusted=no', 'PermitLocalCommand=no',
+  'LocalCommand=none', 'RemoteCommand=none',
+  'ControlPersist=no', 'ExitOnForwardFailure=yes',
   'GatewayPorts=no', 'Tunnel=no', 'RequestTTY=no', 'ForkAfterAuthentication=no',
-  'ConnectTimeout=5', 'ConnectionAttempts=1', 'ServerAliveInterval=15', 'ServerAliveCountMax=2',
+  'ConnectionAttempts=1', 'ServerAliveInterval=15', 'ServerAliveCountMax=2',
 ]
 const optionsArgv = (values: readonly string[]) => values.flatMap(value => ['-o', value])
 const fail = (code: string): never => { throw new SshError(code) }
@@ -85,11 +85,8 @@ async function waitBounded(done: Promise<void>, ms: number): Promise<boolean> {
  * ownership evidence. A successful start requires a private control socket, its
  * master PID, and lsof's exact IPv4 loopback listener to agree.
  *
- * Alias tradeoff: ssh -G evaluates TRUSTED LOCAL ssh_config (including Match exec).
- * Only a small connection/authentication allowlist is copied to a private -F file;
- * the original human alias remains the SSH destination. A fixed Kerberos-to-nc
- * template is translated to bounded system-tool preauthentication plus direct SSH;
- * shell execution, general proxies, jumps and custom providers remain unsupported.
+ * System SSH reads trusted local configuration and owns its connection/authentication logic.
+ * The master starts forwarding-free; a hermetic control request adds only the approved port.
  * No remote-provided config, commands, hostnames or bind addresses are accepted.
  */
 export class SshExecutor {
@@ -98,7 +95,8 @@ export class SshExecutor {
   private readonly controlDirectory: string
   private readonly spawn: SshSpawn
   private readonly runner: SshRunner
-  private readonly settings: Required<Omit<SshExecutorOptions, 'runner' | 'spawn'>>
+  private readonly signalGroup: NonNullable<SshExecutorOptions['signalGroup']>
+  private readonly settings: Required<Omit<SshExecutorOptions, 'runner' | 'spawn' | 'signalGroup'>>
   private readonly instances = new Map<string, Instance>()
   private readonly pending = new Map<string, Pending>()
   private stoppingAll = false
@@ -110,10 +108,13 @@ export class SshExecutor {
     this.sshHost = sshHost
     this.controlDirectory = resolve(controlDirectory)
     this.spawn = options.spawn ?? ((file, args, settings) => nodeSpawn(file, [...args], settings))
+    this.signalGroup = options.signalGroup ?? ((child, signal) => {
+      try { process.kill(-child.pid!, signal) }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error }
+    })
     this.settings = {
-      startupTimeoutMs: options.startupTimeoutMs ?? 10_000,
+      startupTimeoutMs: options.startupTimeoutMs ?? 30_000,
       commandTimeoutMs: options.commandTimeoutMs ?? 2_000,
-      authenticationTimeoutMs: options.authenticationTimeoutMs ?? 5_000,
       terminateTimeoutMs: options.terminateTimeoutMs ?? 1_000,
       pollIntervalMs: options.pollIntervalMs ?? 50,
       maxInstances: options.maxInstances ?? 32,
@@ -227,10 +228,10 @@ export class SshExecutor {
     if ((await lstat(metadata)).size > 8192) fail('SSH_OWNERSHIP_UNVERIFIED')
     let owner: Owner
     try { owner = JSON.parse(await readFile(metadata, 'utf8')) as Owner } catch { return fail('SSH_OWNERSHIP_UNVERIFIED') }
-    if (!owner || owner.leaseId !== input.leaseId || owner.sshHost !== this.sshHost || owner.controlPath !== input.controlPath ||
+    if (!owner || (owner.version !== undefined && owner.version !== 2) || owner.leaseId !== input.leaseId || owner.sshHost !== this.sshHost || owner.controlPath !== input.controlPath ||
         !Number.isSafeInteger(owner.pid) || owner.pid <= 0 || !validPort(owner.port) ||
         (input.processId !== undefined && owner.pid !== input.processId)) fail('SSH_OWNERSHIP_UNVERIFIED')
-    if (!await this.verify(owner, this.settings.commandTimeoutMs)) fail('SSH_OWNERSHIP_UNVERIFIED')
+    if (!await this.verify(owner, this.settings.commandTimeoutMs, owner.version === 2)) fail('SSH_OWNERSHIP_UNVERIFIED')
     const result = await this.control(owner.controlPath, 'exit', this.settings.commandTimeoutMs)
     if (result.code !== 0) fail('SSH_STOP_FAILED')
     // We have no ChildProcess handle after restart: never send TERM/KILL to a saved PID.
@@ -260,28 +261,30 @@ export class SshExecutor {
       const controlPath = join(directory, 'ctl')
       // sockaddr_un is only 104 bytes on macOS; reserve space for OpenSSH's temporary suffix.
       if (Buffer.byteLength(controlPath) > 80) fail('SSH_CONTROL_PATH_TOO_LONG')
-      const config = await this.command(SSH, ['-G', ...optionsArgv([
-        'BatchMode=yes', 'PermitLocalCommand=no', 'LocalCommand=none', 'RemoteCommand=none',
-        'ForwardAgent=no', 'ForwardX11=no', 'CanonicalizeHostname=no',
-      ]), this.sshHost], remaining())
-      if (config.code !== 0) fail('SSH_CONFIG_FAILED')
-      const configPath = join(directory, 'config')
-      const plan = privateConfig(this.sshHost, config.stdout)
-      await writeFile(configPath, plan.config, { flag: 'wx', mode: 0o600 })
-      if (plan.kerberosPrincipal) await this.authenticateKerberos(plan.kerberosPrincipal, remaining)
-      remaining()
-      const child = this.spawn(SSH, ['-F', configPath, '-N', '-T', '-M', '-S', controlPath,
-        ...optionsArgv(SECURITY_OPTIONS), '-L', '127.0.0.1:' + port + ':127.0.0.1:' + port, this.sshHost],
-      { shell: false, stdio: ['ignore', 'pipe', 'pipe'] })
+      // -F is intentionally absent: OpenSSH, not Companion, interprets the user's configuration.
+      // ClearAllForwardings also clears CLI -L, so add the authorized listener later via mux.
+      const child = this.spawn(SSH, ['-N', '-T', '-M', '-S', controlPath,
+        ...optionsArgv([...SECURITY_OPTIONS, 'ClearAllForwardings=yes']), this.sshHost],
+      { shell: false, detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
       instance = this.track(child, leaseId, port, directory, controlPath)
       this.instances.set(leaseId, instance)
       if (!Number.isSafeInteger(instance.pid) || instance.pid <= 0) fail('SSH_SPAWN_FAILED')
-      const owner: Owner = { leaseId, sshHost: this.sshHost, pid: instance.pid, port, controlPath }
+      const owner: Owner = { version: 2, leaseId, sshHost: this.sshHost, pid: instance.pid, port, controlPath }
       await writeFile(join(directory, 'owner.json'), JSON.stringify(owner), { flag: 'wx', mode: 0o600 })
+      let forwardingRequested = false
       while (true) {
         remaining()
         if (instance.exited) fail(exitCode(instance.stderr))
-        if (await this.verify(instance, remaining()).catch(() => false)) {
+        if (!forwardingRequested && await this.verifyMaster(instance, remaining()).catch(() => false)) {
+          remaining()
+          if (instance.exited) fail(exitCode(instance.stderr))
+          const result = await this.command(SSH, ['-F', '/dev/null', '-S', controlPath, '-O', 'forward',
+            ...optionsArgv(SECURITY_OPTIONS), '-L', '127.0.0.1:' + port + ':127.0.0.1:' + port, this.sshHost], remaining())
+          remaining()
+          if (result.code !== 0) fail(exitCode(Buffer.concat([instance.stderr, Buffer.from(result.stderr)])) === 'SSH_PORT_IN_USE' ? 'SSH_PORT_IN_USE' : 'SSH_FORWARD_FAILED')
+          forwardingRequested = true
+        }
+        if (forwardingRequested && await this.verify(instance, remaining()).catch(() => false)) {
           remaining()
           if (instance.exited) fail(exitCode(instance.stderr))
           instance.ready = true
@@ -319,9 +322,9 @@ export class SshExecutor {
     if (instance.stopPromise) return instance.stopPromise
     instance.stopping = true
     instance.stopPromise = (async () => {
-      if (!instance.exited) instance.child.kill('SIGTERM')
+      if (!instance.exited && instance.pid > 0) this.signalGroup(instance.child, 'SIGTERM')
       if (!await waitBounded(instance.done, this.settings.terminateTimeoutMs)) {
-        if (!instance.exited) instance.child.kill('SIGKILL')
+        if (!instance.exited && instance.pid > 0) this.signalGroup(instance.child, 'SIGKILL')
         if (!await waitBounded(instance.done, this.settings.terminateTimeoutMs)) fail('SSH_STOP_TIMEOUT')
       }
       await rm(instance.directory, { recursive: true, force: true })
@@ -332,15 +335,21 @@ export class SshExecutor {
     return instance.stopPromise
   }
 
-  private async verify(owner: Pick<Owner, 'pid' | 'port' | 'controlPath'>, timeout: number): Promise<boolean> {
+  private async verifyMaster(owner: Pick<Owner, 'pid' | 'controlPath'>, timeout: number): Promise<boolean> {
     const deadline = Date.now() + timeout
     await privateEntry(dirname(owner.controlPath), 'directory')
     await privateEntry(owner.controlPath, 'socket')
     const check = await this.control(owner.controlPath, 'check', Math.max(1, deadline - Date.now()))
     const match = /^Master running \(pid=(\d+)\)\s*$/.exec((check.stderr || check.stdout).trim())
-    if (check.code !== 0 || !match || Number(match[1]) !== owner.pid) return false
+    return check.code === 0 && !!match && Number(match[1]) === owner.pid
+  }
+
+  private async verify(owner: Pick<Owner, 'pid' | 'port' | 'controlPath'>, timeout: number, allowAbsentListener = false): Promise<boolean> {
+    const deadline = Date.now() + timeout
+    if (!await this.verifyMaster(owner, timeout)) return false
     const listeners = await this.command(LSOF,
       ['-nP', '-a', '-p', String(owner.pid), '-iTCP', '-sTCP:LISTEN', '-Fpn'], Math.max(1, deadline - Date.now()))
+    if (allowAbsentListener && listeners.code === 1 && !listeners.stdout.trim() && !listeners.stderr.trim()) return true
     if (listeners.code !== 0) return false
     const lines = listeners.stdout.trim().split('\n')
     const pids = lines.filter(line => line.startsWith('p'))
@@ -359,21 +368,11 @@ export class SshExecutor {
     return realpath(this.controlDirectory)
   }
 
-  private async authenticateKerberos(principal: string, remaining: () => number): Promise<void> {
-    const run = (file: string, args: string[]) => this.command(file, args, remaining(), this.settings.authenticationTimeoutMs).catch(error => {
-      if (error instanceof SshError && error.code === 'SSH_COMMAND_TIMEOUT') fail('SSH_KERBEROS_TIMEOUT')
-      return fail('SSH_KERBEROS_UNAVAILABLE')
-    })
-    // Never execute the configured shell, inspect keytab bytes, or forward credentials.
-    if ((await run('/usr/bin/klist', ['-s'])).code === 0) return
-    if ((await run('/usr/bin/kinit', ['-k', '-t', join(homedir(), '.keytab'), principal])).code !== 0) fail('SSH_KERBEROS_FAILED')
-  }
-
-  private async command(file: string, args: readonly string[], timeout: number, limit = this.settings.commandTimeoutMs): Promise<SshCommandResult> {
+  private async command(file: string, args: readonly string[], timeout: number): Promise<SshCommandResult> {
     const controller = new AbortController()
     let timer: ReturnType<typeof setTimeout> | undefined
     const expired = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => { controller.abort(); reject(new SshError('SSH_COMMAND_TIMEOUT')) }, Math.min(timeout, limit))
+      timer = setTimeout(() => { controller.abort(); reject(new SshError('SSH_COMMAND_TIMEOUT')) }, Math.min(timeout, this.settings.commandTimeoutMs))
     })
     const task = Promise.resolve().then(() => this.runner.run(file, args, { shell: false, signal: controller.signal, maxOutputBytes: MAX_COMMAND_OUTPUT }))
     try {
@@ -437,72 +436,4 @@ async function privateEntry(path: string, kind: 'directory' | 'file' | 'socket')
   if (uid === undefined || stat.uid !== uid || stat.isSymbolicLink() ||
       (kind === 'directory' ? !stat.isDirectory() || (stat.mode & 0o777) !== 0o700 :
         kind === 'file' ? !stat.isFile() || (stat.mode & 0o777) !== 0o600 : !stat.isSocket())) fail('SSH_OWNERSHIP_UNVERIFIED')
-}
-
-function privateConfig(alias: string, output: string): { config: string; kerberosPrincipal?: string } {
-  if (/[\x00-\x08\x0b-\x1f\x7f]/.test(output)) fail('SSH_CONFIG_UNSAFE')
-  const values = new Map<string, string[]>()
-  for (const line of output.split('\n')) {
-    if (!line.trim()) continue
-    const match = /^([a-z][a-z0-9]*) (.+)$/i.exec(line)
-    if (!match) throw new SshError('SSH_CONFIG_UNSAFE')
-    // OpenSSH emits mixed-case keywords (e.g. canonicalizePermittedcnames).
-    // Normalize keys before duplicate checks; values remain case-sensitive.
-    const key = match[1]!.toLowerCase(), value = match[2]!
-    const items = values.get(key) ?? []
-    items.push(value)
-    values.set(key, items)
-  }
-  const one = (key: string, required = false): string | undefined => {
-    const items = values.get(key)
-    if (items && items.length !== 1) fail('SSH_CONFIG_UNSAFE')
-    if (required && !items?.[0]) fail('SSH_CONFIG_UNSAFE')
-    return items?.[0]
-  }
-  const jump = one('proxyjump')
-  if (jump && jump !== 'none') fail('SSH_UNSUPPORTED_PROXY')
-  let kerberosPrincipal: string | undefined
-  const proxy = one('proxycommand')
-  if (proxy && proxy !== 'none') {
-    // Only this fixed authentication-then-direct-TCP template is recognized; no shell is evaluated.
-    const match = /^(?:bash|\/bin\/bash) -lc '\/usr\/bin\/klist -s \|\| \/usr\/bin\/kinit -k -t ~\/\.keytab ([A-Za-z0-9][A-Za-z0-9_.-]{0,127}@[A-Za-z0-9][A-Za-z0-9.-]{0,127}); exec (?:nc|\/usr\/bin\/nc) %h %p'$/.exec(proxy)
-    if (!match) fail('SSH_UNSUPPORTED_PROXY')
-    kerberosPrincipal = match![1]!
-  }
-  const hostname = one('hostname', true)!, user = one('user', true)!, port = one('port', true)!
-  if (!/^[A-Za-z0-9][A-Za-z0-9_.:-]*$/.test(hostname) || !/^[A-Za-z0-9_][A-Za-z0-9_.@+-]*$/.test(user) ||
-      !/^\d+$/.test(port) || !validPort(Number(port))) fail('SSH_CONFIG_UNSAFE')
-  const lines = ['Host ' + alias, '  HostName ' + hostname, '  User ' + user, '  Port ' + port]
-  const quote = (value: string) => {
-    if (!value || /["\\%$#\x00-\x1f\x7f]/.test(value)) fail('SSH_CONFIG_UNSAFE')
-    return '"' + value + '"'
-  }
-  for (const identity of values.get('identityfile') ?? []) lines.push('  IdentityFile ' + quote(identity))
-  const hostKeyAlias = one('hostkeyalias')
-  if (hostKeyAlias && hostKeyAlias !== 'none') {
-    if (!/^[A-Za-z0-9][A-Za-z0-9_.:-]*$/.test(hostKeyAlias)) fail('SSH_CONFIG_UNSAFE')
-    lines.push('  HostKeyAlias ' + hostKeyAlias)
-  }
-  for (const key of ['userknownhostsfile', 'globalknownhostsfile']) {
-    const value = one(key)
-    if (value) {
-      const paths = value.split(/\s+/)
-      if (paths.some(path => path === 'none' || path === '/dev/null')) fail('SSH_CONFIG_UNSAFE')
-      lines.push('  ' + key + ' ' + paths.map(quote).join(' '))
-    }
-  }
-  const identitiesOnly = one('identitiesonly')
-  if (identitiesOnly === 'yes' || identitiesOnly === 'no') lines.push('  IdentitiesOnly ' + identitiesOnly)
-  const gssapi = one('gssapiauthentication')
-  if (gssapi) {
-    if (!['yes','no'].includes(gssapi)) fail('SSH_CONFIG_UNSAFE')
-    lines.push('  GSSAPIAuthentication ' + gssapi)
-  }
-  const preferred = one('preferredauthentications')
-  if (preferred) {
-    if (preferred.split(',').some(method => !['gssapi-with-mic','hostbased','publickey','keyboard-interactive','password'].includes(method))) fail('SSH_CONFIG_UNSAFE')
-    lines.push('  PreferredAuthentications ' + preferred)
-  }
-  // No Include, Match, LocalForward, RemoteForward, DynamicForward, commands or providers.
-  return { config: lines.join('\n') + '\n', ...(kerberosPrincipal ? {kerberosPrincipal} : {}) }
 }

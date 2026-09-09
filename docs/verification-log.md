@@ -120,3 +120,13 @@ Mac 再次运行后的实际恢复和在线状态仍待用户确认。没有删�
 3083 实际公开下载为 0.1.7，经路径别名运行版本正确；bootstrap 摘要与下载匹配：f79f9992570d66b35033f82e32c4aa4a2ae161019c92a75ef4a8837d080a2b6f。插件 tgz：04b8750f182750f0d6290dbbc5edddb9b9dd75bf8013f840a40611eee40ea606；CLI tgz：93d73f111873ef7d08a343dc0583ce62f94e80bf7b0f6aa9ad0a41b8b7d707f5。未修改 SSH 配置、keytab、Bifrost、Better Sidebar 或稳定 Host，未重启 3083。
 
 不宣称完成 Mac 实际取票/5173 浏览器验收；适配不支持依赖 login-shell profile 的额外环境初始化。升级不续期 Lease或重置 Forward Instance 的累计预算；现有 Open Lease 可在页面点击“重新检查”明确授权一次尝试。
+
+## 2026-09-09：0.1.8 原生 SSH 配置
+
+按照用户要求，删除 ssh -G 解析器、私有白名单配置和 0.1.7 的 Kerberos 模板适配。系统 SSH 原生读取可信本地连接/认证配置；Companion 不直接执行 klist/kinit。架构与信任边界见 [原生 SSH 配置决策](adr/0001-native-ssh-configuration.md)。
+
+先以临时隔离 sshd 和匿名 ProxyCommand 复现 SSH_UNSUPPORTED_PROXY，再改为 forwarding-free master + hermetic mux forward。真实 ProxyCommand、ProxyJump、配置中的 L/R/D 转发隔离、LocalCommand 抑制、实际端口冲突分类和正常代理后代退出均通过。未读取个人 keytab/SSH 密钥，未修改用户 SSH 配置。契约测试保留 listener/PID/socket、超时、取消、恢复、无法证实所有权不杀进程等保护，并增加 mux 失败和认证后取消的保护。V2 记录可安全关闭已认证但无 listener 的 master。
+
+CLI 139 项、Plugin 67 项通过，类型检查与打包通过。格式检查发现删除旧解析器留下的 EOF 空行，清理后完整门禁重跑成功。0.1.8 插件 tgz SHA256 为 3f870cc2cadcec983df1c84b2e93a305ffb49530c114c4ae24c8c7f0d051918a，CLI tgz 为 6ff098c31b36e68fe420ca0570533f8811afed6602e35171e2481e9ac0c24a07。
+
+3083 公开下载 HTTP 200，实际 bundle 经路径别名运行输出 dsh-companion 0.1.8；bootstrap 摘要与 bundle 一致：2146d3eed1842b5fb04d72d1d61af8dc4be29af8b5730559a573aa399dc412aa。未重启 3083、未更改稳定 Host、Bifrost 或 Better Sidebar。真实 Mac 取票及浏览器 5173 数据路径仍待验收；升级不续期 Lease，现有 Open Lease 可点击“重新检查”显式尝试。

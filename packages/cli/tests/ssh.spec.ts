@@ -3,142 +3,17 @@ import { EventEmitter, once } from 'node:events'
 import { chmod, lstat, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { createConnection, createServer, type Server } from 'node:net'
 import { dirname, join } from 'node:path'
-import { homedir } from 'node:os'
 import { PassThrough } from 'node:stream'
 import test, { type TestContext } from 'node:test'
-import { execFile, type ChildProcess } from 'node:child_process'
-import { promisify } from 'node:util'
+import { type ChildProcess } from 'node:child_process'
 import { SshExecutor, type SshCommandResult, type SshExecutorOptions, type SshRunner, type SshSpawn } from '../src/ssh.js'
 
 // These are Linux-portable contract tests, not evidence of macOS/OpenSSH integration.
-const CONFIG = [
-  'host work-box', 'hostname host.example.test', 'user alice', 'port 2222',
-  'identityfile ~/.ssh/id_ed25519', 'identitiesonly yes', 'hostkeyalias pinned-box',
-  'userknownhostsfile /home/alice/.ssh/known_hosts', 'globalknownhostsfile /etc/ssh/ssh_known_hosts',
-].join('\n') + '\n'
-const KERBEROS_PROXY = "bash -lc '/usr/bin/klist -s || /usr/bin/kinit -k -t ~/.keytab alice@EXAMPLE.TEST; exec nc %h %p'"
+const ok = (stdout = '', stderr = ''): SshCommandResult => ({code:0,stdout,stderr})
+const denied = (): SshCommandResult => ({code:1,stdout:'',stderr:''})
+// Command runner contract tests exercise this bounded seam independently of master startup.
+const command = (executor: SshExecutor) => (executor as unknown as {command(file:string,args:string[],timeout:number):Promise<SshCommandResult>}).command('/usr/bin/ssh',['-F','/dev/null','-S','/tmp/test-only','-O','check','work-box'],100)
 
-test('known Kerberos wrapper becomes bounded argv-only preauthentication and direct SSH', async t => {
-  const f = await fixture(t)
-  f.state.config = CONFIG + 'proxycommand '+KERBEROS_PROXY+'\ngssapiauthentication yes\ngssapidelegatecredentials yes\n'
-  const child = await f.executor.start('lease',5173)
-  const config = await readFile(join(dirname(child.controlPath),'config'),'utf8')
-  assert.ok(config.includes('GSSAPIAuthentication yes'))
-  assert.ok(!config.includes('ProxyCommand'))
-  assert.ok(!config.includes('keytab'))
-  assert.deepEqual(f.calls.filter(c=>c.file==='/usr/bin/klist').map(c=>c.args),[['-s']])
-  assert.deepEqual(f.calls.filter(c=>c.file==='/usr/bin/kinit').map(c=>c.args),[['-k','-t',join(homedir(),'.keytab'),'alice@EXAMPLE.TEST']])
-  assert.ok(f.calls.every(c=>c.shell===false))
-  assert.ok(f.spawns[0]!.args.includes('ProxyCommand=none'))
-  assert.ok(f.spawns[0]!.args.includes('GSSAPIDelegateCredentials=no'))
-})
-
-test('existing Kerberos ticket skips kinit', async t => {
-  const f = await fixture(t)
-  f.state.ticketValid = true
-  f.state.config = CONFIG + 'proxycommand '+KERBEROS_PROXY+'\n'
-  await f.executor.start('lease',5173)
-  assert.equal(f.calls.filter(c=>c.file==='/usr/bin/klist').length,1)
-  assert.equal(f.calls.filter(c=>c.file==='/usr/bin/kinit').length,0)
-})
-
-test('failed Kerberos initialization never opens SSH and never exposes command output', async t => {
-  const f = await fixture(t)
-  f.state.ticketFailure = true
-  f.state.config = CONFIG + 'proxycommand '+KERBEROS_PROXY+'\n'
-  await assert.rejects(f.executor.start('lease',5173),{message:'SSH_KERBEROS_FAILED'})
-  assert.equal(f.spawns.length,0)
-  assert.deepEqual(await readdir(f.root),[])
-})
-
-test('real ssh -G preserves the supported wrapper and sanitized GSSAPI policy', async t => {
-  const f = await fixture(t)
-  const input = join(f.root,'input-config')
-  await writeFile(input,'Host work-box\n  HostName host.example.test\n  User alice\n  GSSAPIAuthentication yes\n  PreferredAuthentications gssapi-with-mic,publickey\n  ProxyCommand '+KERBEROS_PROXY+'\n')
-  const run=promisify(execFile)
-  f.state.config=(await run('/usr/bin/ssh',['-G','-F',input,'work-box'],{encoding:'utf8',timeout:5000})).stdout
-  await f.executor.start('lease',5173)
-  const effective=(await run('/usr/bin/ssh',['-G',...f.spawns[0]!.args],{encoding:'utf8',timeout:5000})).stdout
-  assert.match(effective,/^gssapiauthentication yes$/m)
-  assert.match(effective,/^gssapidelegatecredentials no$/m)
-  assert.match(effective,/^preferredauthentications gssapi-with-mic,publickey$/m)
-  assert.ok(!effective.includes('kinit'))
-})
-
-test('Kerberos template cannot carry extra commands, paths, proxy switches or a jump host', async t => {
-  for (const extra of [KERBEROS_PROXY+'; id', KERBEROS_PROXY.replace('alice','$(id)'), KERBEROS_PROXY.replace('~/.keytab','/tmp/other'), KERBEROS_PROXY.replace('exec nc','exec nc -x proxy'), KERBEROS_PROXY.replace('%h %p','%h 22'), KERBEROS_PROXY+'\nproxyjump bastion']) {
-    const f = await fixture(t)
-    f.state.config=CONFIG+'proxycommand '+extra+'\n'
-    await assert.rejects(f.executor.start('lease',5173),/SSH_UNSUPPORTED_PROXY/)
-    assert.equal(f.spawns.length,0)
-    assert.ok(!f.calls.some(c=>c.file==='/usr/bin/kinit'||c.file==='/usr/bin/klist'))
-  }
-})
-
-test('Kerberos timeout aborts the owned command and does not open a listener', async t => {
-  const f=await fixture(t,{authenticationTimeoutMs:5})
-  f.state.config=CONFIG+'proxycommand '+KERBEROS_PROXY+'\n'
-  const run=f.runner.run.bind(f.runner)
-  let aborted=false
-  f.runner.run=async(file,args,settings)=>{
-    if(file==='/usr/bin/kinit') return new Promise(resolve=>settings.signal.addEventListener('abort',()=>{aborted=true;resolve({code:1,stdout:'SECRET',stderr:'SECRET'})},{once:true}))
-    return run(file,args,settings)
-  }
-  await assert.rejects(f.executor.start('lease',5173),{message:'SSH_KERBEROS_TIMEOUT'})
-  assert.equal(aborted,true)
-  assert.equal(f.spawns.length,0)
-  assert.deepEqual(await readdir(f.root),[])
-})
-
-test('cancellation during ticket inspection cannot launch kinit or SSH afterward', async t => {
-  const f=await fixture(t)
-  f.state.config=CONFIG+'proxycommand '+KERBEROS_PROXY+'\n'
-  const run=f.runner.run.bind(f.runner)
-  let entered!:()=>void, release!:(r:SshCommandResult)=>void
-  const inspecting=new Promise<void>(resolve=>{entered=resolve})
-  f.runner.run=async(file,args,settings)=>{
-    if(file==='/usr/bin/klist') {entered();return new Promise(resolve=>{release=resolve})}
-    return run(file,args,settings)
-  }
-  const outcome=assert.rejects(f.executor.start('lease',5173),/SSH_START_CANCELLED/)
-  await inspecting
-  const stopped=f.executor.stop('lease')
-  release(denied())
-  await Promise.all([outcome,stopped])
-  assert.equal(f.spawns.length,0)
-  assert.ok(!f.calls.some(c=>c.file==='/usr/bin/kinit'))
-})
-
-test('normal OpenSSH mixed-case keyword does not reject an otherwise safe configuration', async t => {
-  const f = await fixture(t)
-  f.state.config = CONFIG + 'canonicalizePermittedcnames none\n'
-  const child = await f.executor.start('lease', 5173)
-  const config = await readFile(join(dirname(child.controlPath), 'config'), 'utf8')
-  assert.ok(!config.toLowerCase().includes('canonicalizepermittedcnames'))
-  assert.ok(config.includes('HostName host.example.test'))
-})
-
-test('real system ssh -G defaults can be sanitized without a network connection', async t => {
-  let output: string
-  try {
-    const result = await promisify(execFile)('/usr/bin/ssh', [
-      '-G', '-F', '/dev/null', '-o', 'BatchMode=yes', '-o', 'PermitLocalCommand=no',
-      '-o', 'LocalCommand=none', '-o', 'RemoteCommand=none', '-o', 'ForwardAgent=no',
-      '-o', 'ForwardX11=no', '-o', 'CanonicalizeHostname=no', 'example.invalid',
-    ], { encoding: 'utf8', timeout: 5000, maxBuffer: 256 * 1024 })
-    output = result.stdout
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') { t.skip('System OpenSSH is not installed'); return }
-    throw error
-  }
-  const f = await fixture(t)
-  f.state.config = output
-  await f.executor.start('lease', 5173)
-  assert.equal(f.spawns.length, 1)
-})
-
-const ok = (stdout = '', stderr = ''): SshCommandResult => ({ code: 0, stdout, stderr })
-const denied = (): SshCommandResult => ({ code: 1, stdout: '', stderr: '' })
 class FakeChild extends EventEmitter {
   readonly stdout = new PassThrough()
   readonly stderr = new PassThrough()
@@ -171,9 +46,6 @@ async function fixture(t: TestContext, options: SshExecutorOptions = {}) {
   const children: FakeChild[] = []
   const sockets = new Map<string, { child: FakeChild; server: Server; port: number }>()
   const state = {
-    config: CONFIG,
-    ticketValid: false,
-    ticketFailure: false,
     masterOffset: 0,
     listener: undefined as ((pid: number, port: number) => SshCommandResult) | undefined,
     closeMaster: true,
@@ -181,12 +53,13 @@ async function fixture(t: TestContext, options: SshExecutorOptions = {}) {
     configureChild: (_child: FakeChild) => {},
   }
   const spawn: SshSpawn = (file, args, settings) => {
+    assert.equal(settings.detached,true)
     spawns.push({ file, args, shell: settings.shell })
     const child = new FakeChild(41000 + children.length)
     children.push(child)
     state.configureChild(child)
     const path = args[args.indexOf('-S') + 1]!
-    const port = Number(args[args.indexOf('-L') + 1]!.split(':')[1])
+    const port = 0
     if (state.makeSocket) {
       const server = createServer()
       sockets.set(path, { child, server, port })
@@ -198,12 +71,13 @@ async function fixture(t: TestContext, options: SshExecutorOptions = {}) {
   }
   const runner: SshRunner = { async run(file, args, settings) {
     calls.push({ file, args, shell: settings.shell })
-    if (args.includes('-G')) return ok(state.config)
-    if (file === '/usr/bin/klist') return state.ticketValid ? ok() : denied()
-    if (file === '/usr/bin/kinit') return state.ticketFailure ? {code:1,stdout:'SECRET',stderr:'SECRET'} : ok()
     if (args.includes('-O')) {
       const value = sockets.get(args[args.indexOf('-S') + 1]!)
       if (!value || value.child.exited) return denied()
+      if (args.includes('forward')) {
+        value.port = Number(args[args.indexOf('-L') + 1]!.split(':')[1])
+        return ok()
+      }
       if (args.includes('exit')) {
         if (state.closeMaster) value.child.finish(0)
         return ok()
@@ -214,6 +88,7 @@ async function fixture(t: TestContext, options: SshExecutorOptions = {}) {
       const pid = Number(args[args.indexOf('-p') + 1])
       const value = [...sockets.values()].find(value => value.child.pid === pid)
       if (!value || value.child.exited) return denied()
+      if (!value.port) return {code:1,stdout:'',stderr:''}
       return state.listener?.(pid, value.port) ?? ok('p' + pid + '\nn127.0.0.1:' + value.port + '\n')
     }
     if (file === '/bin/ps') {
@@ -222,7 +97,7 @@ async function fixture(t: TestContext, options: SshExecutorOptions = {}) {
     }
     throw new Error('Unexpected command: ' + file)
   } }
-  const settings = { runner, spawn, startupTimeoutMs: 150, commandTimeoutMs: 80, terminateTimeoutMs: 20, pollIntervalMs: 2, ...options }
+  const settings = { runner, spawn, signalGroup: (child: ChildProcess, signal: 'SIGTERM' | 'SIGKILL') => { child.kill(signal) }, startupTimeoutMs: 150, commandTimeoutMs: 80, terminateTimeoutMs: 20, pollIntervalMs: 2, ...options }
   const executor = new SshExecutor('work-box', root, settings)
   t.after(async () => {
     for (const child of children) child.finish(0)
@@ -233,44 +108,60 @@ async function fixture(t: TestContext, options: SshExecutorOptions = {}) {
   return { root, calls, spawns, children, sockets, state, runner, spawn, settings, executor }
 }
 
-test('fixed argv, human alias, strict host keys and a private forwarding-free config', async t => {
+test('failed mux forward never reports running and closes its authenticated master', async t => {
+  const f=await fixture(t)
+  const run=f.runner.run.bind(f.runner)
+  let forwards=0
+  f.runner.run=async(file,args,options)=>{
+    if(args.includes('forward')) {forwards++;return denied()}
+    return run(file,args,options)
+  }
+  await assert.rejects(f.executor.start('lease',3080),/SSH_FORWARD_FAILED/)
+  assert.equal(forwards,1)
+  assert.equal(f.children[0]!.exited,true)
+  assert.equal(await f.executor.isOwned('lease'),false)
+  assert.deepEqual(await readdir(f.root),[])
+})
+
+test('cancellation after master verification never adds a forward', async t => {
+  const f=await fixture(t)
+  const run=f.runner.run.bind(f.runner)
+  let entered!:()=>void,release!:()=>void,first=true
+  const verifying=new Promise<void>(r=>{entered=r}),gate=new Promise<void>(r=>{release=r})
+  f.runner.run=async(file,args,options)=>{
+    const result=await run(file,args,options)
+    if(first && args.includes('check')) {first=false;entered();await gate}
+    return result
+  }
+  const outcome=assert.rejects(f.executor.start('lease',3080),/SSH_START_CANCELLED/)
+  await verifying
+  const stopped=f.executor.stop('lease')
+  release()
+  await Promise.all([stopped,outcome])
+  assert.equal(f.calls.filter(c=>c.args.includes('forward')).length,0)
+  assert.equal(f.children[0]!.exited,true)
+})
+
+test('native alias connection and hermetic same-port forwarding have separate argv', async t => {
   const f = await fixture(t)
-  f.state.config += [
-    'localforward 0.0.0.0:9999 other:22', 'remoteforward 8888 secret:80', 'dynamicforward 7777',
-    'forwardagent yes', 'forwardx11 yes', 'localcommand touch /tmp/DO-NOT-RUN',
-    'remotecommand bash', 'permitlocalcommand yes', 'stricthostkeychecking no',
-    'controlpath /tmp/foreign', 'controlpersist yes', 'knownhostscommand sh evil',
-  ].join('\n') + '\n'
-  const started = await f.executor.start('lease-1', 3080)
-  assert.equal(started.pid, 41000)
-  assert.equal(await f.executor.isOwned('lease-1'), true)
-  const call = f.spawns[0]!
-  assert.equal(call.file, '/usr/bin/ssh')
-  assert.equal(call.shell, false)
-  assert.equal(call.args.at(-1), 'work-box')
-  assert.deepEqual(call.args.filter(arg => arg === '-L' || arg === '-R' || arg === '-D'), ['-L'])
-  assert.equal(call.args[call.args.indexOf('-L') + 1], '127.0.0.1:3080:127.0.0.1:3080')
-  for (const arg of ['-N', '-T', '-M', 'BatchMode=yes', 'StrictHostKeyChecking=yes', 'ExitOnForwardFailure=yes',
-    'ForwardAgent=no', 'ForwardX11=no', 'ForwardX11Trusted=no', 'PermitLocalCommand=no', 'LocalCommand=none',
-    'RemoteCommand=none', 'ControlPersist=no', 'ProxyCommand=none', 'ProxyJump=none', 'GatewayPorts=no']) assert.ok(call.args.includes(arg), arg)
-  const configPath = call.args[call.args.indexOf('-F') + 1]!
-  const config = await readFile(configPath, 'utf8')
-  assert.match(config, /^Host work-box\n  HostName host.example.test\n  User alice\n  Port 2222\n/)
-  assert.match(config, /IdentityFile "~\/.ssh\/id_ed25519"/)
-  assert.match(config, /HostKeyAlias pinned-box/)
-  assert.doesNotMatch(config, /forward|command|Include|Match|DO-NOT-RUN|controlpath/i)
-  assert.equal((await lstat(configPath)).mode & 0o777, 0o600)
-  assert.equal((await lstat(join(dirname(configPath), 'owner.json'))).mode & 0o777, 0o600)
-  assert.equal((await lstat(dirname(configPath))).mode & 0o777, 0o700)
-  assert.equal((await lstat(f.root)).mode & 0o777, 0o700)
-  assert.ok(f.calls.every(call => !call.shell))
-  const check = f.calls.find(call => call.args.includes('check'))!
-  assert.equal(check.args[check.args.indexOf('-F') + 1], '/dev/null')
-  const lsof = f.calls.find(call => call.file.endsWith('/lsof'))!
-  assert.deepEqual(lsof.args, ['-nP', '-a', '-p', '41000', '-iTCP', '-sTCP:LISTEN', '-Fpn'])
-  await f.executor.stop('lease-1')
-  assert.deepEqual(f.children[0]!.signals, ['SIGTERM'])
-  assert.equal(await f.executor.isOwned('lease-1'), false)
+  const started = await f.executor.start('lease-1',3080)
+  assert.equal(started.pid,41000)
+  assert.equal(await f.executor.isOwned('lease-1'),true)
+  const call=f.spawns[0]!
+  assert.equal(call.file,'/usr/bin/ssh')
+  assert.equal(call.shell,false)
+  assert.equal(call.args.at(-1),'work-box')
+  for(const flag of ['-G','-F','-L']) assert.ok(!call.args.includes(flag))
+  for(const flag of ['ClearAllForwardings=yes','StrictHostKeyChecking=yes','ControlPersist=no','BatchMode=yes','PermitLocalCommand=no','RemoteCommand=none','GatewayPorts=no']) assert.ok(call.args.includes(flag),flag)
+  for(const flag of ['ProxyCommand=none','ProxyJump=none','GSSAPIDelegateCredentials=no']) assert.ok(!call.args.includes(flag),flag)
+  const forwarding=f.calls.filter(c=>c.args.includes('forward'))
+  assert.equal(forwarding.length,1)
+  assert.ok(forwarding[0]!.args.includes('/dev/null'))
+  assert.ok(forwarding[0]!.args.includes('127.0.0.1:3080:127.0.0.1:3080'))
+  assert.ok(!forwarding[0]!.args.includes('ClearAllForwardings=yes'))
+  await assert.rejects(readFile(join(dirname(started.controlPath),'config')),{code:'ENOENT'})
+  assert.equal((await lstat(dirname(started.controlPath))).mode & 0o777,0o700)
+  assert.equal((await lstat(join(dirname(started.controlPath),'owner.json'))).mode & 0o777,0o600)
 })
 
 test('input cannot inject options, shell text, alternate bind addresses, or traversal paths', async t => {
@@ -286,25 +177,6 @@ test('input cannot inject options, shell text, alternate bind addresses, or trav
   const started = await f.executor.start('../../outside', 3080)
   assert.equal(dirname(dirname(started.controlPath)), await realpath(f.root))
   assert.doesNotMatch(started.controlPath, /outside|\.\./)
-})
-
-test('refuses proxy commands/jumps and malformed allowlisted configuration', async t => {
-  const f = await fixture(t)
-  for (const extra of ['proxycommand sh -c evil', 'proxyjump bastion']) {
-    f.state.config = CONFIG + extra + '\n'
-    await assert.rejects(f.executor.start('lease', 3080), /SSH_UNSUPPORTED_PROXY/)
-  }
-  for (const config of [
-    CONFIG + 'hostname second.example\n', CONFIG + 'HostName second.example\n', CONFIG.replace('host.example.test', 'evil # injected'),
-    CONFIG.replace('2222', '22 -L 0.0.0.0:99:x:99'), CONFIG + 'identityfile bad"\n',
-    CONFIG + 'identityfile %h/secret\n', CONFIG + 'identityfile bad\\path\n',
-    CONFIG.replace('/home/alice/.ssh/known_hosts', '/dev/null'), CONFIG + '\x00',
-  ]) {
-    f.state.config = config
-    await assert.rejects(f.executor.start('lease', 3080), /SSH_CONFIG_UNSAFE/)
-  }
-  assert.equal(f.spawns.length, 0)
-  assert.deepEqual(await readdir(f.root), [])
 })
 
 test('rejects a non-private root and symlink root before running commands', async t => {
@@ -454,22 +326,25 @@ test('early SSH failure rejects start instead of reporting a successful lease', 
   assert.deepEqual(f.children[0]!.signals, [])
 })
 
-test('runner timeout is bounded and sends AbortSignal without spawning a tunnel', async t => {
+test('mux timeout aborts its command and stops the forwarding-free master', async t => {
   let aborted = false
   const f = await fixture(t, { commandTimeoutMs: 10, runner: { run(_file, _args, options) {
     return new Promise((_resolve, reject) => options.signal.addEventListener('abort', () => { aborted = true; reject(new Error('aborted')) }))
   } } })
-  await assert.rejects(f.executor.start('lease', 3080), /SSH_COMMAND_TIMEOUT/)
+  await assert.rejects(f.executor.start('lease', 3080), /SSH_START_TIMEOUT/)
   assert.equal(aborted, true)
-  assert.equal(f.spawns.length, 0)
+  assert.equal(f.spawns.length, 1)
+  assert.equal(f.children[0]!.exited, true)
+  assert.ok(!f.spawns[0]!.args.includes('-L'))
   assert.deepEqual(await readdir(f.root), [])
 })
 
-test('oversized ssh -G output is rejected rather than parsed as a truncated config', async t => {
-  const f = await fixture(t)
-  f.state.config = CONFIG + 'x'.repeat(300_000)
-  await assert.rejects(f.executor.start('lease', 3080), /SSH_COMMAND_OUTPUT_LIMIT/)
-  assert.equal(f.spawns.length, 0)
+test('oversized mux response is rejected and its master is stopped', async t => {
+  const f=await fixture(t)
+  const run=f.runner.run.bind(f.runner)
+  f.runner.run=async(file,args,options)=>args.includes('forward')?ok('x'.repeat(300000)):run(file,args,options)
+  await assert.rejects(f.executor.start('lease',3080),/SSH_COMMAND_OUTPUT_LIMIT/)
+  assert.equal(f.children[0]!.exited,true)
 })
 
 test('restart recovery verifies metadata, socket, PID, listener; only control exit is used', async t => {
@@ -529,7 +404,7 @@ test('default command runner drains output, bounds it, and awaits TERM/KILL usin
   const spawn: SshSpawn = (file, args, options) => {
     assert.equal(file, '/usr/bin/ssh')
     assert.equal(options.shell, false)
-    assert.ok(args.includes('-G'))
+    assert.ok(args.includes('-O'))
     const child = new FakeChild(42000)
     child.exitOn = 'SIGKILL'
     children.push(child)
@@ -537,7 +412,7 @@ test('default command runner drains output, bounds it, and awaits TERM/KILL usin
     return child.asChild()
   }
   const executor = new SshExecutor('work-box', root, { spawn, terminateTimeoutMs: 10, commandTimeoutMs: 100 })
-  await assert.rejects(executor.start('lease', 3080), /SSH_COMMAND_OUTPUT_LIMIT/)
+  await assert.rejects(command(executor), /SSH_COMMAND_OUTPUT_LIMIT/)
   assert.deepEqual(children[0]!.signals, ['SIGTERM', 'SIGKILL'])
   assert.equal(children[0]!.exited, true)
 })
@@ -600,7 +475,7 @@ test('production command timeout awaits kill/reap, and never signals after exit 
   const executor = new SshExecutor('work-box', root, {
     spawn: () => child.asChild(), commandTimeoutMs: 10, terminateTimeoutMs: 10,
   })
-  await assert.rejects(executor.start('lease', 3080), /SSH_COMMAND_TIMEOUT/)
+  await assert.rejects(command(executor), /SSH_COMMAND_TIMEOUT/)
   assert.deepEqual(child.signals, ['SIGTERM', 'SIGKILL'])
   assert.equal(child.exited, true)
 
@@ -610,7 +485,7 @@ test('production command timeout awaits kill/reap, and never signals after exit 
     spawn: () => { queueMicrotask(() => lateClose.finish(1)); return lateClose.asChild() },
     commandTimeoutMs: 10, terminateTimeoutMs: 20,
   })
-  await assert.rejects(second.start('lease', 3080), /SSH_COMMAND_TIMEOUT/)
+  await assert.rejects(command(second), /SSH_COMMAND_TIMEOUT/)
   assert.deepEqual(lateClose.signals, [])
 })
 
