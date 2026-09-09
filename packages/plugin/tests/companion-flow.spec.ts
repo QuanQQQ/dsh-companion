@@ -64,7 +64,7 @@ async function pairOverHttp(port: number, code: string) {
   return paired
 }
 
-async function fixture(t: TestContext) {
+async function fixture(t: TestContext, ttlMs = 60_000) {
   const directory = await mkdtemp(join(tmpdir(), 'companion-wire-contract-'))
   const hostStore = new MemoryCompanionStateStore()
   const service = await CompanionService.create(hostStore)
@@ -92,7 +92,7 @@ async function fixture(t: TestContext) {
   assert.equal(service.snapshot().authorityEpoch, paired.authorityEpoch)
   assert.ok(service.snapshot().pairings.find(item => item.id === ticket.id)?.consumedAt)
   const app = await service.registerTaskService({ taskId: 'task-contract', name: 'Contract app', port: 5173, protocol: 'http', source: 'manual' })
-  const lease = await service.openLease({ taskId: app.taskId, serviceId: app.id, deviceId: paired.device.id, ttlMs: 60_000 })
+  const lease = await service.openLease({ taskId: app.taskId, serviceId: app.id, deviceId: paired.device.id, ttlMs })
   const statePath = join(directory, 'runtime-state.json')
   const store = await RuntimeStore.open(statePath, paired.authorityEpoch)
   const executor = new FakeTunnelExecutor(directory)
@@ -157,6 +157,17 @@ async function fixture(t: TestContext) {
     socket, frames, transmitted, transportErrors, next, hello, fence, send, sendSnapshot, execute, ack, observed,
     waitClosed: async () => { await until(() => closedCode !== undefined, 'revocation socket close'); await disconnect; return closedCode } }
 }
+
+it('the existing CLI accepts a seven-day deadline over the real WebSocket protocol', async t => {
+  const h = await fixture(t, 604_800_000)
+  h.sendSnapshot()
+  const open = await h.next('forward.open')
+  assert.equal(open.expiresAt, h.lease.expiresAt)
+  assert.equal(Date.parse(open.expiresAt) - Date.parse(h.lease.createdAt), 604_800_000)
+  assert.equal((await h.ack(open)).ok, true)
+  await h.observed(h.lease.id, 1, 'running')
+  assert.equal(h.store.snapshot().instances[0]!.expiresAt, h.lease.expiresAt)
+})
 
 it('real Host/CLI wire flow enforces list and restart ACK barriers, close tombstones survive reload', async t => {
   const h = await fixture(t)

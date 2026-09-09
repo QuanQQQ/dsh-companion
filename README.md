@@ -49,7 +49,8 @@ Mac 被拒绝认证时关闭自有 SSH，持久显示 needs_pairing，而非把�
 选择当前 Task 的会话，在 Better Sidebar 的 New tab 菜单打开 **Task Services**。
 
 - 注册服务只声明 Task、名称、端口和协议，**不授权转发**。
-- 选择明确 Device，再创建 TTL-bound Forward Lease。默认 2 小时，最长 8 小时。
+- 选择明确 Device，再创建 TTL-bound Forward Lease。Host 插件 0.1.10 起默认一周（7 天），最长一周；AI 的 `ttl_minutes` 范围为 1–10080，省略时为 10080。页面保留 30 分钟、2 小时、8 小时、24 小时和一周选项。
+- 新默认值只影响新建 Lease；已有 Lease 的到期时间不会因升级、重复打开、重新检查或重启而延长。需要更长授权时，停止原 Lease 后显式重新创建。
 - Preferred Device 只是 UI 默认选择，不影响授权、迁移或故障转移。
 - 一个 Device 的本地端口全局独占；冲突不会换端口，也不会杀未知占用进程。
 - 卡片内“诊断详情”展示 Desired/Observed、generation、Device WSS、SSH child、Listener ownership 和可选 Remote TCP probe。CLI 的远端 TCP probe 关闭，不能把监听成功描述成应用健康。

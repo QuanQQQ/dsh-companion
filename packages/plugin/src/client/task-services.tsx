@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { isForwardCloseConfirmed } from '../closure.js'
+import { DEFAULT_LEASE_TTL_MS } from '../domain.js'
 import type { TabComponentProps } from 'dsh-better-sidebar/client/service'
 import {
   getTaskSnapshot, leaseAction, listTasks, matchTask, openLease, registerService, unregisterService,
@@ -24,7 +25,7 @@ export function TaskServicesTab({ scope, visible }: TabComponentProps) {
   const [serviceName, setServiceName] = useState('Development service')
   const [port, setPort] = useState('')
   const [protocol, setProtocol] = useState<Protocol>('http')
-  const [ttlMinutes, setTtlMinutes] = useState(120)
+  const [ttlMinutes, setTtlMinutes] = useState(DEFAULT_LEASE_TTL_MS / 60_000)
 
   const refresh = useCallback(() => setRefreshKey(value => value + 1), [])
   useEffect(() => {
@@ -107,7 +108,7 @@ export function TaskServicesTab({ scope, visible }: TabComponentProps) {
     {task && snapshot && <>
       <div className="dco-toolbar">
         <div className="dco-summary"><Summary value={snapshot.services.length} label="Task Services"/><Summary value={runningCount(snapshot, selectedDeviceId)} label="此 Device 运行中"/><Summary value={issueCount(snapshot, selectedDeviceId)} label="恢复 / 需处理" warning={issueCount(snapshot, selectedDeviceId) > 0}/></div>
-        <div className="dco-toolbar-actions"><span className="dco-bounded"><i />有界自动恢复</span><label className="dco-ttl">TTL <select value={ttlMinutes} onChange={event => setTtlMinutes(Number(event.target.value))}><option value={30}>30 分钟</option><option value={120}>2 小时</option><option value={480}>8 小时</option></select></label><button className="dco-button" onClick={() => setRegisterOpen(value => !value)}>＋ 注册服务</button><button className="dco-button dco-primary" disabled={!selectedDevice?.online || busy === 'all'} onClick={() => void forwardAll()}>一键转发</button></div>
+        <div className="dco-toolbar-actions"><span className="dco-bounded"><i />有界自动恢复</span><label className="dco-ttl">TTL <select value={ttlMinutes} onChange={event => setTtlMinutes(Number(event.target.value))}><option value={30}>30 分钟</option><option value={120}>2 小时</option><option value={480}>8 小时</option><option value={1440}>24 小时</option><option value={DEFAULT_LEASE_TTL_MS / 60_000}>一周（7 天）</option></select></label><button className="dco-button" onClick={() => setRegisterOpen(value => !value)}>＋ 注册服务</button><button className="dco-button dco-primary" disabled={!selectedDevice?.online || busy === 'all'} onClick={() => void forwardAll()}>一键转发</button></div>
       </div>
       {registerOpen && <div className="dco-register"><div><strong>注册 Task Service</strong><small>注册只添加声明，不会自动建立 SSH 转发。</small></div><input value={serviceName} onChange={event => setServiceName(event.target.value)} aria-label="服务名称"/><input inputMode="numeric" placeholder="端口" value={port} onChange={event => setPort(event.target.value)} aria-label="端口"/><select value={protocol} onChange={event => setProtocol(event.target.value as Protocol)} aria-label="协议"><option>http</option><option>https</option><option>tcp</option></select><button className="dco-button dco-primary" disabled={busy === 'register'} onClick={createService}>注册</button></div>}
       {error && <div className="dco-error-banner">{error}</div>}

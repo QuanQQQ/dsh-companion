@@ -1,8 +1,8 @@
 export const STATE_VERSION = 1 as const
 export const LOOPBACK_HOST = '127.0.0.1' as const
-export const DEFAULT_LEASE_TTL_MS = 2 * 60 * 60 * 1_000
 export const MIN_LEASE_TTL_MS = 60 * 1_000
-export const MAX_LEASE_TTL_MS = 8 * 60 * 60 * 1_000
+export const MAX_LEASE_TTL_MS = 7 * 24 * 60 * 60 * 1_000
+export const DEFAULT_LEASE_TTL_MS = MAX_LEASE_TTL_MS
 
 export type ApplicationProtocol = 'http' | 'https' | 'tcp'
 export type TaskServiceSource = 'manual' | 'agent' | 'process'

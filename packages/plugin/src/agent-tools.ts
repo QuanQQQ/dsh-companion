@@ -1,6 +1,6 @@
 import type { PromptSection } from '@deepseek-ai/dsh-system-prompt'
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
-import { CompanionError } from './domain.js'
+import { CompanionError, DEFAULT_LEASE_TTL_MS, MAX_LEASE_TTL_MS, MIN_LEASE_TTL_MS } from './domain.js'
 import { isForwardCloseConfirmed } from './closure.js'
 import type { CompanionService } from './service.js'
 import type { TaskWorkspaceResolver, TaskWorkspaceTaskRef } from './task-resolver.js'
@@ -78,7 +78,7 @@ export function createCompanionTools(
       parameters: {
         service_id: { type: 'string', required: true, description: 'Task Service id from task_forward_list or task_service_register.' },
         device_id: { type: 'string', required: true, description: 'Explicit paired Device id from task_forward_list. No implicit failover occurs.' },
-        ttl_minutes: { type: 'integer', default: 120, description: 'Authorization lifetime from 1 to 480 minutes; defaults to 120.' },
+        ttl_minutes: { type: 'integer', default: DEFAULT_LEASE_TTL_MS / 60_000, description: `Authorization lifetime from ${MIN_LEASE_TTL_MS / 60_000} to ${MAX_LEASE_TTL_MS / 60_000} minutes; defaults to ${DEFAULT_LEASE_TTL_MS / 60_000} (7 days). Existing Leases are not extended.` },
       },
       output: leaseOutput(),
       async execute(args, exec) {
@@ -87,7 +87,7 @@ export function createCompanionTools(
           taskId: task.id,
           serviceId: args.service_id,
           deviceId: args.device_id,
-          ttlMs: (args.ttl_minutes ?? 120) * 60_000,
+          ttlMs: args.ttl_minutes === undefined ? undefined : args.ttl_minutes * 60_000,
         })
         return presentLease(lease)
       },

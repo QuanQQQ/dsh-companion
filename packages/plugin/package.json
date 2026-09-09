@@ -1,6 +1,6 @@
 {
   "name": "dsh-companion",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "Task-scoped localhost forwarding through paired macOS Companion devices",
   "type": "module",
   "main": "lib/host.mjs",

@@ -1,6 +1,14 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { approveEnrollment, denyEnrollment, unregisterService, leaseAction } from '../src/client/api.js'
+import { approveEnrollment, denyEnrollment, unregisterService, leaseAction, openLease } from '../src/client/api.js'
+
+test('browser week option sends exactly seven days in milliseconds', async t => {
+  t.mock.method(globalThis, 'fetch', async (_input: RequestInfo | URL, init?: RequestInit) => {
+    assert.deepEqual(JSON.parse(String(init?.body)), { deviceId: 'device', ttlMs: 604_800_000 })
+    return Response.json({ ok: true })
+  })
+  await openLease('task', 'service', 'device', 10080)
+})
 
 test('browser approval and denial send the JSON media type required by Host', async t => {
   const paths: string[] = []
