@@ -71,7 +71,17 @@ status 包含本地持久快照，不是实时健康证明。restart 只重启�
 
 用户数据：`~/Library/Application Support/DSH Companion/`；日志：`~/Library/Logs/DSH Companion/`；LaunchAgent：`~/Library/LaunchAgents/dev.deepseek.dsh-companion.plist`。卸载先停止自有 LaunchAgent，再删除本地凭证/配置/bundle/runtime 状态，保留日志/control 目录；**不会代替 DSH 中的 Device 撤销**。
 
-SSH alias 只支持字母/数字/点/横线/下划线，不支持任意 `user@host`。执行器读取可信本机 `ssh -G` 配置后只复制窄白名单到私有配置；拒绝 ProxyCommand/ProxyJump 和额外转发。依赖跳板的环境需要专门设计，不能静默放宽限制。`Match exec` 属于用户本机 SSH 配置求值的信任边界。
+SSH alias 只支持字母/数字/点/横线/下划线，不支持任意 `user@host`。执行器读取可信本机 `ssh -G` 配置后只复制窄白名单到私有配置，包括 GSSAPIAuthentication 和受限的 PreferredAuthentications。`Match exec` 属于用户本机 SSH 配置求值的信任边界。
+
+从 0.1.7 起，识别以下固定的 Kerberos 取票后直连模板（principal 从可信本机配置中取得，不能由 Host 下发）：
+
+```sshconfig
+ProxyCommand bash -lc '/usr/bin/klist -s || /usr/bin/kinit -k -t ~/.keytab user@EXAMPLE.COM; exec nc %h %p'
+```
+
+该模板不会作为 shell 执行：Companion 以固定 argv 调用系统 klist，必要时调用 kinit，然后让 SSH 直接连接解析出的 HostName/Port。也接受 `/bin/bash` 和 `/usr/bin/nc` 的对应写法。系统 kinit 使用现有 keytab；Companion 不读取、保存或上传其内容。每个认证命令默认最多 5 秒，且受整体启动期限约束。已有有效票据不会重复 kinit；失败输出脱敏的 SSH_KERBEROS_FAILED、SSH_KERBEROS_TIMEOUT 或 SSH_KERBEROS_UNAVAILABLE。
+
+不执行 login-shell profile、不继承其中的额外环境初始化、不运行 nc，也不接受任意 ProxyCommand、ProxyJump、自定义 keytab 路径、shell 替换或追加命令。此适配仅覆盖固定模板的取票与直连语义，并非完整 shell 兼容层。SSH 仍禁用 ProxyCommand/ProxyJump、Agent/X11 转发及 GSSAPI 凭证委派，强制 Host Key 校验及同端口 IPv4 loopback listener。需要其他跳板/代理的环境必须单独设计。
 
 ## 构建与测试
 

@@ -108,3 +108,15 @@ Mac 报告 update journal phase=stopping、oldVersion=0.1.3、targetVersion=0.1.
 CLI 138 项、Plugin 67 项通过，类型检查、打包、git diff 检查通过。3083 公开下载返回 200，经符号链接运行输出 dsh-companion 0.1.6；bootstrap 摘要与实际下载字节匹配：3aa8df8324296402386a5de36b29f169c1a9cbbbcc17d9e658d4824ec847706c。插件 tgz：9a133c9eddfcd10ddc7b327002de5d8c1d0d0664d285e7f3ad43efa53b9f536c；CLI tgz：b8a4dc85b65cf46862e86069d1a3fcfe20d5bbd1548777d8c96336fc1146b9df。
 
 Mac 再次运行后的实际恢复和在线状态仍待用户确认。没有删除用户锁或恢复文件，没有改配对、代理、Better Sidebar 或稳定 Host，也没有为下载替换重启 3083。
+
+## 2026-09-08：0.1.7 受限 Kerberos 预认证适配
+
+用户提供的本地 devbox SSH alias 使用 bash -lc 包装 klist -s、必要时通过 ~/.keytab 调用 kinit，然后 exec nc %h %p。该固定模板被原 ProxyCommand 一律拒绝规则挡住；私有 SSH 配置同时没有复制 GSSAPIAuthentication。以匿名同型配置复现 SSH_UNSUPPORTED_PROXY，再加入受限适配。
+
+只识别文档中的固定语法，提取受限 principal；不执行配置中的 shell/profile/nc，而是通过 shell:false、绝对系统程序路径及固定 argv 做本地 Authentication Preflight，再用受控 SSH 直连。系统 kinit 可使用现有 keytab，Agent/Companion 不读取或保存其内容。继承验证过的 GSSAPIAuthentication/PreferredAuthentications，仍强制禁止 ProxyCommand、ProxyJump、Agent/X11 转发与 GSSAPI 凭证委派，并保留严格 Host Key、同端口 loopback 和 listener 所有权证据。
+
+新增测试覆盖有票据跳过 kinit、无票据取票、取票失败不启动 SSH且不泄漏 stderr、实际 OpenSSH -G 两次解析保留认证策略、额外命令/替换/路径/代理参数/跳板拒绝、认证命令超时中止、检查期间取消不再取票或启动。真实 ssh -G 只读取测试配置，不连目标、不执行 Kerberos；klist/kinit 使用注入 runner。CLI 145 项、Plugin 67 项通过，类型检查、打包、diff 检查通过。
+
+3083 实际公开下载为 0.1.7，经路径别名运行版本正确；bootstrap 摘要与下载匹配：f79f9992570d66b35033f82e32c4aa4a2ae161019c92a75ef4a8837d080a2b6f。插件 tgz：04b8750f182750f0d6290dbbc5edddb9b9dd75bf8013f840a40611eee40ea606；CLI tgz：93d73f111873ef7d08a343dc0583ce62f94e80bf7b0f6aa9ad0a41b8b7d707f5。未修改 SSH 配置、keytab、Bifrost、Better Sidebar 或稳定 Host，未重启 3083。
+
+不宣称完成 Mac 实际取票/5173 浏览器验收；适配不支持依赖 login-shell profile 的额外环境初始化。升级不续期 Lease或重置 Forward Instance 的累计预算；现有 Open Lease 可在页面点击“重新检查”明确授权一次尝试。

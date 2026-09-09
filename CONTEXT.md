@@ -18,6 +18,9 @@ A bounded, expiring request from a Mac to become paired. Its visible verificatio
 **Unified Launch**:
 An explicit human invocation that fetches the intended Host's current program, verifies the stored pairing, and replaces the owned local process. A changed authority or rejected credential requires explicit new enrollment; it cannot inherit old forwarding authority.
 
+**Authentication Preflight**:
+A local preparatory action for a human-selected SSH identity before realizing a Forward Instance. It grants no Forward Lease authority, cannot change a Lease endpoint, and does not prove connectivity or listener health.
+
 **Preferred Device**:
 A presentation default used to preselect a Device for a human action. It grants no authority and never causes migration or failover.
 _Avoid_: Primary Device, active Device

@@ -3,6 +3,7 @@ import { EventEmitter, once } from 'node:events'
 import { chmod, lstat, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { createConnection, createServer, type Server } from 'node:net'
 import { dirname, join } from 'node:path'
+import { homedir } from 'node:os'
 import { PassThrough } from 'node:stream'
 import test, { type TestContext } from 'node:test'
 import { execFile, type ChildProcess } from 'node:child_process'
@@ -15,6 +16,99 @@ const CONFIG = [
   'identityfile ~/.ssh/id_ed25519', 'identitiesonly yes', 'hostkeyalias pinned-box',
   'userknownhostsfile /home/alice/.ssh/known_hosts', 'globalknownhostsfile /etc/ssh/ssh_known_hosts',
 ].join('\n') + '\n'
+const KERBEROS_PROXY = "bash -lc '/usr/bin/klist -s || /usr/bin/kinit -k -t ~/.keytab alice@EXAMPLE.TEST; exec nc %h %p'"
+
+test('known Kerberos wrapper becomes bounded argv-only preauthentication and direct SSH', async t => {
+  const f = await fixture(t)
+  f.state.config = CONFIG + 'proxycommand '+KERBEROS_PROXY+'\ngssapiauthentication yes\ngssapidelegatecredentials yes\n'
+  const child = await f.executor.start('lease',5173)
+  const config = await readFile(join(dirname(child.controlPath),'config'),'utf8')
+  assert.ok(config.includes('GSSAPIAuthentication yes'))
+  assert.ok(!config.includes('ProxyCommand'))
+  assert.ok(!config.includes('keytab'))
+  assert.deepEqual(f.calls.filter(c=>c.file==='/usr/bin/klist').map(c=>c.args),[['-s']])
+  assert.deepEqual(f.calls.filter(c=>c.file==='/usr/bin/kinit').map(c=>c.args),[['-k','-t',join(homedir(),'.keytab'),'alice@EXAMPLE.TEST']])
+  assert.ok(f.calls.every(c=>c.shell===false))
+  assert.ok(f.spawns[0]!.args.includes('ProxyCommand=none'))
+  assert.ok(f.spawns[0]!.args.includes('GSSAPIDelegateCredentials=no'))
+})
+
+test('existing Kerberos ticket skips kinit', async t => {
+  const f = await fixture(t)
+  f.state.ticketValid = true
+  f.state.config = CONFIG + 'proxycommand '+KERBEROS_PROXY+'\n'
+  await f.executor.start('lease',5173)
+  assert.equal(f.calls.filter(c=>c.file==='/usr/bin/klist').length,1)
+  assert.equal(f.calls.filter(c=>c.file==='/usr/bin/kinit').length,0)
+})
+
+test('failed Kerberos initialization never opens SSH and never exposes command output', async t => {
+  const f = await fixture(t)
+  f.state.ticketFailure = true
+  f.state.config = CONFIG + 'proxycommand '+KERBEROS_PROXY+'\n'
+  await assert.rejects(f.executor.start('lease',5173),{message:'SSH_KERBEROS_FAILED'})
+  assert.equal(f.spawns.length,0)
+  assert.deepEqual(await readdir(f.root),[])
+})
+
+test('real ssh -G preserves the supported wrapper and sanitized GSSAPI policy', async t => {
+  const f = await fixture(t)
+  const input = join(f.root,'input-config')
+  await writeFile(input,'Host work-box\n  HostName host.example.test\n  User alice\n  GSSAPIAuthentication yes\n  PreferredAuthentications gssapi-with-mic,publickey\n  ProxyCommand '+KERBEROS_PROXY+'\n')
+  const run=promisify(execFile)
+  f.state.config=(await run('/usr/bin/ssh',['-G','-F',input,'work-box'],{encoding:'utf8',timeout:5000})).stdout
+  await f.executor.start('lease',5173)
+  const effective=(await run('/usr/bin/ssh',['-G',...f.spawns[0]!.args],{encoding:'utf8',timeout:5000})).stdout
+  assert.match(effective,/^gssapiauthentication yes$/m)
+  assert.match(effective,/^gssapidelegatecredentials no$/m)
+  assert.match(effective,/^preferredauthentications gssapi-with-mic,publickey$/m)
+  assert.ok(!effective.includes('kinit'))
+})
+
+test('Kerberos template cannot carry extra commands, paths, proxy switches or a jump host', async t => {
+  for (const extra of [KERBEROS_PROXY+'; id', KERBEROS_PROXY.replace('alice','$(id)'), KERBEROS_PROXY.replace('~/.keytab','/tmp/other'), KERBEROS_PROXY.replace('exec nc','exec nc -x proxy'), KERBEROS_PROXY.replace('%h %p','%h 22'), KERBEROS_PROXY+'\nproxyjump bastion']) {
+    const f = await fixture(t)
+    f.state.config=CONFIG+'proxycommand '+extra+'\n'
+    await assert.rejects(f.executor.start('lease',5173),/SSH_UNSUPPORTED_PROXY/)
+    assert.equal(f.spawns.length,0)
+    assert.ok(!f.calls.some(c=>c.file==='/usr/bin/kinit'||c.file==='/usr/bin/klist'))
+  }
+})
+
+test('Kerberos timeout aborts the owned command and does not open a listener', async t => {
+  const f=await fixture(t,{authenticationTimeoutMs:5})
+  f.state.config=CONFIG+'proxycommand '+KERBEROS_PROXY+'\n'
+  const run=f.runner.run.bind(f.runner)
+  let aborted=false
+  f.runner.run=async(file,args,settings)=>{
+    if(file==='/usr/bin/kinit') return new Promise(resolve=>settings.signal.addEventListener('abort',()=>{aborted=true;resolve({code:1,stdout:'SECRET',stderr:'SECRET'})},{once:true}))
+    return run(file,args,settings)
+  }
+  await assert.rejects(f.executor.start('lease',5173),{message:'SSH_KERBEROS_TIMEOUT'})
+  assert.equal(aborted,true)
+  assert.equal(f.spawns.length,0)
+  assert.deepEqual(await readdir(f.root),[])
+})
+
+test('cancellation during ticket inspection cannot launch kinit or SSH afterward', async t => {
+  const f=await fixture(t)
+  f.state.config=CONFIG+'proxycommand '+KERBEROS_PROXY+'\n'
+  const run=f.runner.run.bind(f.runner)
+  let entered!:()=>void, release!:(r:SshCommandResult)=>void
+  const inspecting=new Promise<void>(resolve=>{entered=resolve})
+  f.runner.run=async(file,args,settings)=>{
+    if(file==='/usr/bin/klist') {entered();return new Promise(resolve=>{release=resolve})}
+    return run(file,args,settings)
+  }
+  const outcome=assert.rejects(f.executor.start('lease',5173),/SSH_START_CANCELLED/)
+  await inspecting
+  const stopped=f.executor.stop('lease')
+  release(denied())
+  await Promise.all([outcome,stopped])
+  assert.equal(f.spawns.length,0)
+  assert.ok(!f.calls.some(c=>c.file==='/usr/bin/kinit'))
+})
+
 test('normal OpenSSH mixed-case keyword does not reject an otherwise safe configuration', async t => {
   const f = await fixture(t)
   f.state.config = CONFIG + 'canonicalizePermittedcnames none\n'
@@ -78,6 +172,8 @@ async function fixture(t: TestContext, options: SshExecutorOptions = {}) {
   const sockets = new Map<string, { child: FakeChild; server: Server; port: number }>()
   const state = {
     config: CONFIG,
+    ticketValid: false,
+    ticketFailure: false,
     masterOffset: 0,
     listener: undefined as ((pid: number, port: number) => SshCommandResult) | undefined,
     closeMaster: true,
@@ -103,6 +199,8 @@ async function fixture(t: TestContext, options: SshExecutorOptions = {}) {
   const runner: SshRunner = { async run(file, args, settings) {
     calls.push({ file, args, shell: settings.shell })
     if (args.includes('-G')) return ok(state.config)
+    if (file === '/usr/bin/klist') return state.ticketValid ? ok() : denied()
+    if (file === '/usr/bin/kinit') return state.ticketFailure ? {code:1,stdout:'SECRET',stderr:'SECRET'} : ok()
     if (args.includes('-O')) {
       const value = sockets.get(args[args.indexOf('-S') + 1]!)
       if (!value || value.child.exited) return denied()

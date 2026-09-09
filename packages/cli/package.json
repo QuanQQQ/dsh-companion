@@ -1,6 +1,6 @@
 {
   "name": "dsh-companion-cli",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "macOS Companion for DSH Task Services",
   "type": "module",
   "bin": { "dsh-companion": "lib/cli.mjs" },

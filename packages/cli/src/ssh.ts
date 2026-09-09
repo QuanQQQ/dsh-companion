@@ -2,6 +2,7 @@ import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
+import { homedir } from 'node:os'
 
 export interface SshCommandResult { code: number; stdout: string; stderr: string }
 export interface SshRunOptions { shell: false; signal: AbortSignal; maxOutputBytes: number }
@@ -17,6 +18,7 @@ export interface SshExecutorOptions {
   spawn?: SshSpawn
   startupTimeoutMs?: number
   commandTimeoutMs?: number
+  authenticationTimeoutMs?: number
   terminateTimeoutMs?: number
   pollIntervalMs?: number
   maxInstances?: number
@@ -46,7 +48,7 @@ const LSOF = process.platform === 'darwin' ? '/usr/sbin/lsof' : '/usr/bin/lsof'
 const MAX_COMMAND_OUTPUT = 256 * 1024
 const SECURITY_OPTIONS = [
   'BatchMode=yes', 'StrictHostKeyChecking=yes', 'UpdateHostKeys=no', 'VerifyHostKeyDNS=no',
-  'ForwardAgent=no', 'ForwardX11=no', 'ForwardX11Trusted=no', 'PermitLocalCommand=no',
+  'GSSAPIDelegateCredentials=no', 'ForwardAgent=no', 'ForwardX11=no', 'ForwardX11Trusted=no', 'PermitLocalCommand=no',
   'LocalCommand=none', 'RemoteCommand=none', 'ProxyCommand=none', 'ProxyJump=none',
   'CanonicalizeHostname=no', 'ControlPersist=no', 'ExitOnForwardFailure=yes',
   'GatewayPorts=no', 'Tunnel=no', 'RequestTTY=no', 'ForkAfterAuthentication=no',
@@ -85,8 +87,9 @@ async function waitBounded(done: Promise<void>, ms: number): Promise<boolean> {
  *
  * Alias tradeoff: ssh -G evaluates TRUSTED LOCAL ssh_config (including Match exec).
  * Only a small connection/authentication allowlist is copied to a private -F file;
- * the original human alias remains the SSH destination. ProxyCommand/ProxyJump,
- * custom providers and arbitrary config extensions are intentionally unsupported.
+ * the original human alias remains the SSH destination. A fixed Kerberos-to-nc
+ * template is translated to bounded system-tool preauthentication plus direct SSH;
+ * shell execution, general proxies, jumps and custom providers remain unsupported.
  * No remote-provided config, commands, hostnames or bind addresses are accepted.
  */
 export class SshExecutor {
@@ -110,6 +113,7 @@ export class SshExecutor {
     this.settings = {
       startupTimeoutMs: options.startupTimeoutMs ?? 10_000,
       commandTimeoutMs: options.commandTimeoutMs ?? 2_000,
+      authenticationTimeoutMs: options.authenticationTimeoutMs ?? 5_000,
       terminateTimeoutMs: options.terminateTimeoutMs ?? 1_000,
       pollIntervalMs: options.pollIntervalMs ?? 50,
       maxInstances: options.maxInstances ?? 32,
@@ -262,7 +266,9 @@ export class SshExecutor {
       ]), this.sshHost], remaining())
       if (config.code !== 0) fail('SSH_CONFIG_FAILED')
       const configPath = join(directory, 'config')
-      await writeFile(configPath, privateConfig(this.sshHost, config.stdout), { flag: 'wx', mode: 0o600 })
+      const plan = privateConfig(this.sshHost, config.stdout)
+      await writeFile(configPath, plan.config, { flag: 'wx', mode: 0o600 })
+      if (plan.kerberosPrincipal) await this.authenticateKerberos(plan.kerberosPrincipal, remaining)
       remaining()
       const child = this.spawn(SSH, ['-F', configPath, '-N', '-T', '-M', '-S', controlPath,
         ...optionsArgv(SECURITY_OPTIONS), '-L', '127.0.0.1:' + port + ':127.0.0.1:' + port, this.sshHost],
@@ -353,11 +359,21 @@ export class SshExecutor {
     return realpath(this.controlDirectory)
   }
 
-  private async command(file: string, args: readonly string[], timeout: number): Promise<SshCommandResult> {
+  private async authenticateKerberos(principal: string, remaining: () => number): Promise<void> {
+    const run = (file: string, args: string[]) => this.command(file, args, remaining(), this.settings.authenticationTimeoutMs).catch(error => {
+      if (error instanceof SshError && error.code === 'SSH_COMMAND_TIMEOUT') fail('SSH_KERBEROS_TIMEOUT')
+      return fail('SSH_KERBEROS_UNAVAILABLE')
+    })
+    // Never execute the configured shell, inspect keytab bytes, or forward credentials.
+    if ((await run('/usr/bin/klist', ['-s'])).code === 0) return
+    if ((await run('/usr/bin/kinit', ['-k', '-t', join(homedir(), '.keytab'), principal])).code !== 0) fail('SSH_KERBEROS_FAILED')
+  }
+
+  private async command(file: string, args: readonly string[], timeout: number, limit = this.settings.commandTimeoutMs): Promise<SshCommandResult> {
     const controller = new AbortController()
     let timer: ReturnType<typeof setTimeout> | undefined
     const expired = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => { controller.abort(); reject(new SshError('SSH_COMMAND_TIMEOUT')) }, Math.min(timeout, this.settings.commandTimeoutMs))
+      timer = setTimeout(() => { controller.abort(); reject(new SshError('SSH_COMMAND_TIMEOUT')) }, Math.min(timeout, limit))
     })
     const task = Promise.resolve().then(() => this.runner.run(file, args, { shell: false, signal: controller.signal, maxOutputBytes: MAX_COMMAND_OUTPUT }))
     try {
@@ -423,7 +439,7 @@ async function privateEntry(path: string, kind: 'directory' | 'file' | 'socket')
         kind === 'file' ? !stat.isFile() || (stat.mode & 0o777) !== 0o600 : !stat.isSocket())) fail('SSH_OWNERSHIP_UNVERIFIED')
 }
 
-function privateConfig(alias: string, output: string): string {
+function privateConfig(alias: string, output: string): { config: string; kerberosPrincipal?: string } {
   if (/[\x00-\x08\x0b-\x1f\x7f]/.test(output)) fail('SSH_CONFIG_UNSAFE')
   const values = new Map<string, string[]>()
   for (const line of output.split('\n')) {
@@ -443,9 +459,15 @@ function privateConfig(alias: string, output: string): string {
     if (required && !items?.[0]) fail('SSH_CONFIG_UNSAFE')
     return items?.[0]
   }
-  for (const key of ['proxycommand', 'proxyjump']) {
-    const value = one(key)
-    if (value && value !== 'none') fail('SSH_UNSUPPORTED_PROXY')
+  const jump = one('proxyjump')
+  if (jump && jump !== 'none') fail('SSH_UNSUPPORTED_PROXY')
+  let kerberosPrincipal: string | undefined
+  const proxy = one('proxycommand')
+  if (proxy && proxy !== 'none') {
+    // Only this fixed authentication-then-direct-TCP template is recognized; no shell is evaluated.
+    const match = /^(?:bash|\/bin\/bash) -lc '\/usr\/bin\/klist -s \|\| \/usr\/bin\/kinit -k -t ~\/\.keytab ([A-Za-z0-9][A-Za-z0-9_.-]{0,127}@[A-Za-z0-9][A-Za-z0-9.-]{0,127}); exec (?:nc|\/usr\/bin\/nc) %h %p'$/.exec(proxy)
+    if (!match) fail('SSH_UNSUPPORTED_PROXY')
+    kerberosPrincipal = match![1]!
   }
   const hostname = one('hostname', true)!, user = one('user', true)!, port = one('port', true)!
   if (!/^[A-Za-z0-9][A-Za-z0-9_.:-]*$/.test(hostname) || !/^[A-Za-z0-9_][A-Za-z0-9_.@+-]*$/.test(user) ||
@@ -471,6 +493,16 @@ function privateConfig(alias: string, output: string): string {
   }
   const identitiesOnly = one('identitiesonly')
   if (identitiesOnly === 'yes' || identitiesOnly === 'no') lines.push('  IdentitiesOnly ' + identitiesOnly)
+  const gssapi = one('gssapiauthentication')
+  if (gssapi) {
+    if (!['yes','no'].includes(gssapi)) fail('SSH_CONFIG_UNSAFE')
+    lines.push('  GSSAPIAuthentication ' + gssapi)
+  }
+  const preferred = one('preferredauthentications')
+  if (preferred) {
+    if (preferred.split(',').some(method => !['gssapi-with-mic','hostbased','publickey','keyboard-interactive','password'].includes(method))) fail('SSH_CONFIG_UNSAFE')
+    lines.push('  PreferredAuthentications ' + preferred)
+  }
   // No Include, Match, LocalForward, RemoteForward, DynamicForward, commands or providers.
-  return lines.join('\n') + '\n'
+  return { config: lines.join('\n') + '\n', ...(kerberosPrincipal ? {kerberosPrincipal} : {}) }
 }
