@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { approveEnrollment, denyEnrollment } from '../src/client/api.js'
+import { approveEnrollment, denyEnrollment, unregisterService, leaseAction } from '../src/client/api.js'
 
 test('browser approval and denial send the JSON media type required by Host', async t => {
   const paths: string[] = []
@@ -13,5 +13,7 @@ test('browser approval and denial send the JSON media type required by Host', as
   })
   await approveEnrollment('own-id')
   await denyEnrollment('own-id')
-  assert.deepEqual(paths,['/api/companion/enrollments/own-id/approve','/api/companion/enrollments/own-id/deny'])
+  await unregisterService('task/a', 'service/a')
+  await leaseAction('lease/a', 'close')
+  assert.deepEqual(paths,['/api/companion/enrollments/own-id/approve','/api/companion/enrollments/own-id/deny','/api/companion/tasks/task%2Fa/services/service%2Fa/unregister','/api/companion/leases/lease%2Fa/close'])
 })

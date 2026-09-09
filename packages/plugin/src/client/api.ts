@@ -139,6 +139,10 @@ export async function registerService(
   await requestJson(`/api/companion/tasks/${encodeURIComponent(taskId)}/services`, jsonPost(input))
 }
 
+export async function unregisterService(taskId: string, serviceId: string): Promise<void> {
+  await requestJson(`/api/companion/tasks/${encodeURIComponent(taskId)}/services/${encodeURIComponent(serviceId)}/unregister`, jsonPost({}))
+}
+
 export async function openLease(taskId: string, serviceId: string, deviceId: string, ttlMinutes: number): Promise<void> {
   await requestJson(
     `/api/companion/tasks/${encodeURIComponent(taskId)}/services/${encodeURIComponent(serviceId)}/leases`,

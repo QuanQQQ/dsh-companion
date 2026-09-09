@@ -174,6 +174,15 @@ export function createCompanionHttpRoute(
           sendJson(res, 201, { ok: true, service: taskService })
           return
         }
+        const unregisterMatch = /^\/tasks\/([^/]+)\/services\/([^/]+)\/unregister$/.exec(relative)
+        if (unregisterMatch) {
+          const taskId = decodeRouteId(unregisterMatch[1])
+          await requireTask(resolver, taskId, false)
+          const removed = await service.unregisterTaskService(taskId, decodeRouteId(unregisterMatch[2]))
+          sendJson(res, 200, { ok: true, service: removed,
+            leases: service.listTask(taskId).leases.filter(lease => lease.serviceId === removed.id) })
+          return
+        }
         const openMatch = /^\/tasks\/([^/]+)\/services\/([^/]+)\/leases$/.exec(relative)
         if (openMatch) {
           await requireTask(resolver, decodeRouteId(openMatch[1]), true)
@@ -193,7 +202,7 @@ export function createCompanionHttpRoute(
           if (action !== 'close') {
             const owned = service.snapshot().leases.find(item => item.id === leaseId)
             if (!owned) throw new CompanionError('NOT_FOUND', 'Forward Lease not found', 404)
-            await requireTask(resolver, owned.taskId, true)
+            await requireTask(resolver, owned.taskId, action === 'restart' || owned.desiredState === 'open')
           }
           const lease = action === 'close'
             ? await service.closeLease(leaseId)

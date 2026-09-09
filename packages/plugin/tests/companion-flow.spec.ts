@@ -8,6 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { it, type TestContext } from 'node:test'
 import { WebSocket } from 'ws'
 import { CompanionService } from '../src/service.js'
+import { isForwardCloseConfirmed } from '../src/closure.js'
 import { CompanionDeviceHub } from '../src/device-hub.js'
 import { MemoryCompanionStateStore } from '../src/store.js'
 import { createCompanionHttpRoute } from '../src/http-route.js'
@@ -234,6 +235,27 @@ it('real Host/CLI wire flow enforces list and restart ACK barriers, close tombst
   await afterRestart.disconnect()
   assert.deepEqual(h.transportErrors, [])
   assert.ok(h.transmitted.some(raw => raw.includes('"state":"running"')))
+})
+
+it('unregister delivers a real close frame and retains confirmation after the card is gone', async t => {
+  const h = await fixture(t)
+  h.sendSnapshot()
+  const open = await h.next('forward.open')
+  await h.ack(open)
+  await h.observed(h.lease.id, 1, 'running')
+  const offset = h.frames.length
+  await h.service.unregisterTaskService(h.app.taskId, h.app.id)
+  const snapshot = h.service.listTask(h.app.taskId)
+  assert.equal(snapshot.services.length, 0)
+  assert.equal(isForwardCloseConfirmed(snapshot.leases[0]!, snapshot.instances[0]), false)
+  const close = await h.next('forward.close', offset)
+  await h.ack(close)
+  await h.observed(h.lease.id, close.generation, 'closed')
+  const confirmed = h.service.listTask(h.app.taskId)
+  assert.equal(isForwardCloseConfirmed(confirmed.leases[0]!, confirmed.instances[0]), true)
+  assert.equal(h.executor.owned.size, 0)
+  assert.equal((await h.controller.execute(open)).errorCode, 'STALE_GENERATION')
+  assert.equal(h.executor.starts.length, 1)
 })
 
 it('real Host revocation closes authenticated socket and fake tunnels; old op and credential cannot revive it', async t => {

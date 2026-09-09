@@ -1,13 +1,14 @@
 import type { PromptSection } from '@deepseek-ai/dsh-system-prompt'
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { CompanionError } from './domain.js'
+import { isForwardCloseConfirmed } from './closure.js'
 import type { CompanionService } from './service.js'
 import type { TaskWorkspaceResolver, TaskWorkspaceTaskRef } from './task-resolver.js'
 
 export const COMPANION_GUIDANCE_SECTION: PromptSection = {
   name: 'dsh-companion:guidance',
   order: 119,
-  text: 'Task Service registration only records a service expected on the current Task devbox loopback port; it never authorizes forwarding. Forwarding requires task_forward_open and a paired Device id. Companion mappings are always Mac 127.0.0.1:PORT to devbox 127.0.0.1:PORT with the same port. Never claim that a Preferred Device grants authority or that recovery migrates a Lease. The tools do not accept hosts, SSH flags, keys, ProxyCommand, or target aliases.',
+  text: 'Task Service registration only records a service expected on the current Task devbox loopback port; it never authorizes forwarding. Forwarding requires task_forward_open and a paired Device id. Companion mappings are always Mac 127.0.0.1:PORT to devbox 127.0.0.1:PORT with the same port. Never claim that a Preferred Device grants authority or that recovery migrates a Lease. Use task_forward_close to stop a single Lease while retaining its service, or task_service_unregister to retire a service and close all its Device Leases. Neither stops the devbox application. A closed desired state is not proof of listener shutdown; task_forward_list reports close_confirmed from a matching-generation observation. The tools do not accept hosts, SSH flags, keys, ProxyCommand, or target aliases.',
 }
 
 export function createCompanionTools(
@@ -39,6 +40,39 @@ export function createCompanionTools(
       },
     }),
     defineTool({
+      name: 'task_service_unregister',
+      description: 'Unregister a service in the current Task and revoke ALL of its Device Forward Leases. Retains close tombstones and diagnostics; does not stop the devbox application. Idempotent. Closed desired state is not proof that an offline Device has stopped its listener; use task_forward_list to inspect observations.',
+      parameters: {
+        service_id: { type: 'string', required: true, description: 'Task Service id from task_forward_list or task_service_register. All associated Device Leases will be closed.' },
+      },
+      output: {
+        ...serviceOutput(),
+        schema: { ...serviceOutput().schema, properties: {
+          ...serviceOutput().schema.properties,
+          archived_at: { type: 'string', required: true },
+          leases: { type: 'array', required: true, items: leaseOutput().schema },
+        } },
+      },
+      async execute(args, exec) {
+        const task = await currentTask(resolver, exec, true)
+        const removed = await service.unregisterTaskService(task.id, args.service_id)
+        return { ...presentService(removed), archived_at: removed.archivedAt!,
+          leases: service.listTask(task.id).leases.filter(lease => lease.serviceId === removed.id).map(presentLease) }
+      },
+    }),
+    defineTool({
+      name: 'task_forward_close',
+      description: 'Revoke one Forward Lease in the current Task, retaining its service declaration. Idempotent; does not stop the devbox application. Close delivery may be pending while the Device is offline; inspect task_forward_list before claiming the listener stopped.',
+      parameters: {
+        lease_id: { type: 'string', required: true, description: 'Forward Lease id from task_forward_list. Only this Lease is closed.' },
+      },
+      output: leaseOutput(),
+      async execute(args, exec) {
+        const task = await currentTask(resolver, exec, true)
+        return presentLease(await service.closeLease(args.lease_id, 'user', task.id))
+      },
+    }),
+    defineTool({
       name: 'task_forward_open',
       description: 'Open a TTL-bound same-port loopback Forward Lease for one registered service and one explicitly selected paired Device in the current Task.',
       parameters: {
@@ -64,7 +98,7 @@ export function createCompanionTools(
       parameters: {},
       output: snapshotOutput(),
       async execute(_args, exec) {
-        const task = await currentTask(resolver, exec)
+        const task = await currentTask(resolver, exec, true)
         return presentSnapshot(service, task.id)
       },
     }),
@@ -88,12 +122,13 @@ export function createCompanionTools(
 async function currentTask(
   resolver: TaskWorkspaceResolver,
   exec: { agent?: { session?: { header?: { cwd?: string } } } },
+  allowArchived = false,
 ): Promise<TaskWorkspaceTaskRef> {
   const cwd = exec.agent?.session?.header?.cwd
   if (!cwd) throw new CompanionError('VALIDATION_ERROR', 'this operation requires a calling Agent with a working directory')
   const task = await resolver.resolveFromCwd(cwd)
   if (!task) throw new CompanionError('VALIDATION_ERROR', 'this operation requires an Agent inside a Task Workspace')
-  if (task.status === 'archived') throw new CompanionError('VALIDATION_ERROR', 'archived Tasks cannot register or forward services')
+  if (!allowArchived && task.status === 'archived') throw new CompanionError('VALIDATION_ERROR', 'archived Tasks cannot register or forward services')
   return task
 }
 
@@ -115,10 +150,11 @@ function presentSnapshot(service: CompanionService, taskId: string) {
     services: snapshot.services.map(presentService),
     devices: snapshot.devices.map(item => ({ id: item.id, name: item.name, online: item.online, revoked: item.revokedAt !== undefined })),
     leases: snapshot.leases.map(lease => {
-      const instance = snapshot.instances.find(item => item.leaseId === lease.id)
+      const instance = snapshot.instances.find(item => item.leaseId === lease.id && item.generation === lease.generation)
       return {
         ...presentLease(lease),
-        instance_state: instance?.state ?? 'absent',
+        instance_state: instance?.generation === lease.generation ? instance.state : 'unconfirmed',
+        close_confirmed: isForwardCloseConfirmed(lease, instance),
         ...(instance?.errorCode ? { error_code: instance.errorCode } : {}),
       }
     }),
@@ -167,6 +203,7 @@ function snapshotOutput() {
         leases: { type: 'array' as const, required: true, items: {
           type: 'object' as const, additionalProperties: false, properties: {
             ...leaseOutput().schema.properties,
+            close_confirmed: { type: 'boolean' as const, required: true },
             instance_state: { type: 'string' as const, required: true }, error_code: { type: 'string' as const },
           },
         } },

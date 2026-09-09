@@ -130,8 +130,8 @@ export class CompanionService {
   listTask(taskId: string): TaskSnapshot {
     const normalizedTaskId = assertNonEmpty(taskId, 'taskId')
     const services = this.state.services.filter(service => service.taskId === normalizedTaskId && !service.archivedAt)
-    const serviceIds = new Set(services.map(service => service.id))
-    const leases = this.state.leases.filter(lease => serviceIds.has(lease.serviceId))
+    // Archived services still need observable close delivery and recovery diagnostics.
+    const leases = this.state.leases.filter(lease => lease.taskId === normalizedTaskId)
     const leaseIds = new Set(leases.map(lease => lease.id))
     return {
       taskId: normalizedTaskId,
@@ -287,6 +287,27 @@ export class CompanionService {
     return structuredClone(result)
   }
 
+  async unregisterTaskService(taskId: string, serviceId: string): Promise<TaskService> {
+    const normalizedTaskId = assertNonEmpty(taskId, 'taskId')
+    let result!: TaskService
+    await this.transact(state => {
+      const service = requireService(state, serviceId)
+      if (service.taskId !== normalizedTaskId) throw new CompanionError('NOT_FOUND', 'Task Service does not belong to the requested Task', 404)
+      const now = this.clock.now()
+      if (!service.archivedAt) {
+        service.archivedAt = iso(now)
+        service.updatedAt = iso(now)
+      }
+      for (const lease of state.leases) {
+        if (lease.serviceId === service.id && lease.desiredState === 'open') {
+          closeLeaseInState(state, lease, 'service_archived', now, this.ids)
+        }
+      }
+      result = service
+    })
+    return structuredClone(result)
+  }
+
   async openLease(input: OpenLeaseInput): Promise<ForwardLease> {
     const ttlMs = assertTtl(input.ttlMs ?? DEFAULT_LEASE_TTL_MS)
     const now = this.clock.now()
@@ -334,11 +355,12 @@ export class CompanionService {
     return structuredClone(result)
   }
 
-  async closeLease(leaseId: string, reason: CloseReason = 'user'): Promise<ForwardLease> {
+  async closeLease(leaseId: string, reason: CloseReason = 'user', taskId?: string): Promise<ForwardLease> {
     const now = this.clock.now()
     let result!: ForwardLease
     await this.transact(state => {
       const lease = requireLease(state, leaseId)
+      if (taskId !== undefined && lease.taskId !== taskId) throw new CompanionError('NOT_FOUND', 'Forward Lease does not belong to the current Task', 404)
       if (lease.desiredState === 'open') closeLeaseInState(state, lease, reason, now, this.ids)
       result = lease
     })

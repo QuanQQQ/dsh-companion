@@ -57,7 +57,18 @@ Mac 被拒绝认证时关闭自有 SSH，持久显示 needs_pairing，而非把�
 - Session 结束不关闭 Lease；归档 Task、撤销 Device、TTL 到期会关闭。
 - WSS 失联关闭自有 SSH；重连先上报快照，再等待 Host 对账授权，不自行复活旧命令。
 
-AI 工具限定为 `task_service_register`、`task_forward_open`、`task_forward_list`、`task_forward_restart`，从调用 Agent 的 cwd 精确解析所属 Task，不提供任意 SSH 命令、远端地址或参数执行能力。
+AI 工具包括 `task_service_register`、`task_service_unregister`、`task_forward_open`、`task_forward_close`、`task_forward_list`、`task_forward_restart`，从调用 Agent 的 cwd 精确解析所属 Task，不提供任意 SSH 命令、远端地址或参数执行能力。
+
+### 停止转发与注销服务
+
+这些工具和页面操作由 Host 插件 0.1.9 提供，沿用协议 v1；Mac CLI 0.1.8 无需为此升级。
+
+- `task_forward_close({ lease_id })` / 卡片“停止转发”：仅撤销指定 Lease，服务声明和其他 Device 的 Lease 保留。重复请求不增加关闭代次。
+- `task_service_unregister({ service_id })` / 卡片“注销服务”：原子归档当前 Task 的声明并关闭其所有 Device 的 Open Lease；保留关闭 tombstone、命令及观测。页面要求确认全部 Device 的影响。重复注销不创建新关闭代次。
+- 两项操作都不终止 devbox 应用、不撤销 Device 配对、不修改 SSH 配置。重新注册相同端口会生成新 service id，不继承旧授权。
+- API 返回 Closed 表示授权已撤销，不代表 Mac 已停止端口。`task_forward_list` 中 `close_confirmed` 只有在当前 generation 观测到 closed、SSH exited、listener missing 时为 true。注销后的 Lease 仍可查询，页面“已注销服务的转发关闭记录”保留待确认状态和重新检查入口。
+- 离线 Device 在重连时对账关闭，不允许旧 Open 命令复活。Task 已归档也允许 AI 查询、停止及注销，但不允许新增转发。
+- Host 管理路由 `POST /api/companion/tasks/:taskId/services/:serviceId/unregister` 要求已认证、可信来源的 JSON 请求；与 AI 工具一样校验服务所属 Task。
 
 ## 运维与恢复
 

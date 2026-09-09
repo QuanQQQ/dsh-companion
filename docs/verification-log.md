@@ -130,3 +130,23 @@ Mac 再次运行后的实际恢复和在线状态仍待用户确认。没有删�
 CLI 139 项、Plugin 67 项通过，类型检查与打包通过。格式检查发现删除旧解析器留下的 EOF 空行，清理后完整门禁重跑成功。0.1.8 插件 tgz SHA256 为 3f870cc2cadcec983df1c84b2e93a305ffb49530c114c4ae24c8c7f0d051918a，CLI tgz 为 6ff098c31b36e68fe420ca0570533f8811afed6602e35171e2481e9ac0c24a07。
 
 3083 公开下载 HTTP 200，实际 bundle 经路径别名运行输出 dsh-companion 0.1.8；bootstrap 摘要与 bundle 一致：2146d3eed1842b5fb04d72d1d61af8dc4be29af8b5730559a573aa399dc412aa。未重启 3083、未更改稳定 Host、Bifrost 或 Better Sidebar。真实 Mac 取票及浏览器 5173 数据路径仍待验收；升级不续期 Lease，现有 Open Lease 可点击“重新检查”显式尝试。
+
+## 2026-09-09：0.1.9 开发——停止转发与注销服务
+
+新增 task_forward_close 与 task_service_unregister；停止保留声明，注销在同一事务中归档声明并撤销所有 Device 的 Open Lease。保留关闭 tombstone、命令与观测，重复注销不增代，归档服务不再接受新 Open。停止/注销均不终止 devbox 应用。页面增加显式操作、全 Device 范围确认和注销后的关闭记录；AI 列表通过匹配 generation 的 closed/exited/missing 观测提供 close_confirmed。
+
+新增回归覆盖跨 Task 拒绝、重复调用、持久化失败回滚、并发打开/注销、重载与重新注册不继承权限、HTTP 登录/来源/JSON 校验、AI 工具执行和真实 WebSocket close/ACK。CLI 139 项 + Plugin 75 项共 214 项通过，类型检查、两包构建和 git diff --check 通过。WebSocket 测试使用 fake tunnel executor，不等同于真实 Mac UI 验收。
+
+浏览器访问原 3083 返回连接拒绝；PDM 起初报告项目 stopped，随后启动返回 Unknown development project，最新项目列表已无 dsh-companion-production-local。因此未重建该环境、未声称完成浏览器验收。实现保留在 feat/service-lifecycle；Host 插件版本 0.1.9，Mac CLI 仍为 0.1.8；未推送或排队本次改动，未改 Sidebar/Task Workspace 参考源码。
+
+## 2026-09-09：新隔离实例的 AI 与浏览器验收
+
+按用户要求创建 PDM 项目 dsh-companion-lifecycle-test，分配 3083，使用新的独立 Home。组合为 Companion 0.1.9 工作树、正式 npm Sidebar 0.18.0、已发布的 Task Workspace 0.3.2 tarball、Codex Connect 0.1.0-alpha.4.29；不引用 Sidebar/Task Workspace 的参考源码。启动后 Codex doctor 确认与 DSH 0.1.2-rc.1 兼容；按此前用户授权仅复制当前 Codex 账户的独立认证快照，权限 0600，不改源认证或主动刷新令牌。Mac 配对没有迁移。
+
+新建专用验收 Task。GPT-6-Astra 真实会话调用 task_service_register、task_service_unregister、task_forward_list 三个工具，确认声明已移除。正式 Sidebar 的公开 Task Services 标签正常加载。另用未建立 SSH 的离线模拟 Device 验证页面：停止转发将指定 Lease 变为 Closed/user/g2，并保留服务；未确认注销时声明仍在，确认后卡片移除，历史 Lease 仍可查询，关闭记录显示待确认停止。未将授权撤销误报为 Mac listener 已关闭。模拟 Device 已撤销。
+
+验收中断后 PDM 报告该实例 stopped，通过 PDM start 恢复相同 Home 后核对持久状态，再完成注销，不重建或清空数据。测试地址为 http://10.37.230.238:3083/mobile-auth，Agent 验证地址为 http://127.0.0.1:3083/。真实 Mac 的进程与 listener 停止仍需在新 Home 配对后验证。本次未改稳定版或排队发布 0.1.9。
+
+## 2026-09-09：0.1.9 发布前验证
+
+用户基于验收结果授权合入 main 并通过 PDM 排队更新。发布前重跑锁文件检查、两包类型检查、214 项测试（CLI 139、Plugin 75）、两包构建和 diff 检查，全部通过。Sidebar peer 范围补入已在新实例实际验收的 ^0.18.0，同时保留 ^0.13.1。发布目标仅为 Companion 0.1.9，Mac CLI 保持 0.1.8；依赖源码不随本次发布合并或替换。后续安装必须由 PDM 空闲门禁执行，验证与排队结果以管理器的不可变发布记录为准。

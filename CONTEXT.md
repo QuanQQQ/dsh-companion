@@ -43,6 +43,14 @@ _Avoid_: Tunnel, Forward
 Creation or refresh of a Task Service declaration. Registration never opens a Forward Lease.
 _Avoid_: Forwarding, authorization
 
+**Task Service Unregistration**:
+Retirement of one declaration and atomic revocation of all its Device Leases. Close records and observations remain queryable; no devbox application process is stopped. Registering the same port again creates a fresh declaration without inheriting authorization.
+_Avoid_: Device unpairing, process shutdown
+
+**Forward Close**:
+Revocation of one Lease while retaining its service declaration and other Device Leases. Listener shutdown is confirmed only by a matching-generation observation reporting closed, SSH exited, and listener missing; Desired Closed alone is not confirmation.
+_Avoid_: Service deletion, synchronous shutdown proof
+
 **Forward Lease**:
 A time-bounded authorization for one Task Service on one Device. A Lease fixes both ends to loopback and requires the Device port to equal the Task Service port.
 _Avoid_: Tunnel, connection

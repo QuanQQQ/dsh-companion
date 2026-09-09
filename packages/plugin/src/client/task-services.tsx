@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { isForwardCloseConfirmed } from '../closure.js'
 import type { TabComponentProps } from 'dsh-better-sidebar/client/service'
 import {
-  getTaskSnapshot, leaseAction, listTasks, matchTask, openLease, registerService,
+  getTaskSnapshot, leaseAction, listTasks, matchTask, openLease, registerService, unregisterService,
   type DeviceDto, type ForwardLeaseDto, type InstanceDto, type Protocol, type TaskServiceDto,
   type TaskSnapshotDto, type TaskSummaryDto,
 } from './api.js'
@@ -114,6 +115,7 @@ export function TaskServicesTab({ scope, visible }: TabComponentProps) {
         {snapshot.services.map(service => <ServiceCard key={service.id} service={service} snapshot={snapshot} task={task} device={selectedDevice} ttlMinutes={ttlMinutes} busy={busy} runAction={runAction} />)}
         {snapshot.services.length === 0 && <div className="dco-empty"><TaskServicesIcon size={28}/><strong>此 Task 还没有 Service</strong><span>由 AI 调用 task_service_register，或手动注册一个 loopback 端口。</span><button className="dco-button" onClick={() => setRegisterOpen(true)}>注册服务</button></div>}
       </main>
+      <RetiredForwards snapshot={snapshot} busy={busy} runAction={runAction} />
       <footer className="dco-footer"><span>Listener 固定 127.0.0.1</span><span>同端口映射</span><span>Session 结束不关闭 Lease</span></footer>
     </>}
     {task && !snapshot && <div className="dco-center">{error || '正在加载 Task Services…'}</div>}
@@ -144,6 +146,11 @@ function ServiceCard(props: {
     {lease && <div className="dco-lease-grid"><div><span>Forward Lease</span><b>期望 {lease.desiredState === 'open' ? 'Open' : 'Closed'} · TTL {ttlRemaining(lease.expiresAt)}</b></div><div><span>Forward Instance</span><b>{instanceSummary(instance, lease)}</b></div></div>}
     {instance?.errorCode && <div className={`dco-inline-error ${state === 'needs_attention' ? 'hard' : ''}`}><code>{instance.errorCode}</code><span>{instance.errorMessage ?? 'Forward Instance 运行失败'}</span></div>}
     <div className="dco-service-foot"><div className="dco-evidence" title={service.evidence}>{service.evidence ?? (service.source === 'manual' ? '用户在当前 Task 手动注册' : 'AI 在当前 Task 注册')}</div><ServiceActions service={service} task={task} device={device} lease={lease} instance={instance} busy={busy === actionKey} ttlMinutes={ttlMinutes} act={act}/></div>
+    <div className="dco-service-foot"><span>注销仅移除声明，不停止 devbox 应用；会撤销所有 Device 的关联转发。</span><button className="dco-button" disabled={Boolean(busy)} onClick={() => {
+      if (window.confirm('注销服务「' + service.name + '」(:' + service.port + ')？所有 Device 的关联转发都会关闭；devbox 应用进程不会停止。')) {
+        void act(() => unregisterService(task.id, service.id), '服务已注销，关联转发关闭已提交；可在关闭记录中查看设备确认。')
+      }
+    }}>注销服务</button></div>
     {otherOpen.length > 0 && <div className="dco-other">另有 {otherOpen.length} 台 Device 持有 Open Lease：{otherOpen.map(item => snapshot.devices.find(deviceItem => deviceItem.id === item.deviceId)?.name).filter(Boolean).join('、')}</div>}
     <details className="dco-diagnostics"><summary>诊断详情 <span>Desired / Observed · g{lease?.generation ?? '—'}</span></summary><div className="dco-diagnostic-body">
       <div className="dco-runtime"><Fact label="Lease 期望" value={lease?.desiredState.toUpperCase() ?? 'NONE'}/><Fact label="Instance 观测" value={instance?.state.toUpperCase() ?? 'ABSENT'}/><Fact label="Generation" value={lease ? `g${lease.generation}` : '—'}/><Fact label="端口策略" value={`127.0.0.1:${service.port} ↔ :${service.port}`}/></div>
@@ -157,25 +164,44 @@ function ServiceCard(props: {
 function ServiceActions(props: { service: TaskServiceDto; task: TaskSummaryDto; device?: DeviceDto | undefined; lease?: ForwardLeaseDto | undefined; instance?: InstanceDto | undefined; busy: boolean; ttlMinutes: number; act(action: () => Promise<void>, success: string): Promise<void> }) {
   const { service, task, device, lease, instance, busy, ttlMinutes, act } = props
   if (!device) return <button className="dco-button dco-primary" disabled>先配对 Device</button>
+  if (lease?.desiredState === 'closed' && !isForwardCloseConfirmed(lease, instance)) return <button className="dco-button" disabled={busy} onClick={() => void act(() => leaseAction(lease.id, 'recheck'), '已重新提交关闭；等待设备确认。')}>重新检查关闭</button>
   if (!lease || lease.desiredState === 'closed') return <button className="dco-button dco-primary" disabled={!device.online || busy} onClick={() => void act(() => openLease(task.id, service.id, device.id, ttlMinutes), '已创建 TTL-bound Forward Lease。')}>转发到此设备</button>
-  if (instance?.state === 'running') return <div className="dco-actions"><button className="dco-button dco-primary" onClick={() => openLocal(service)}>打开 localhost</button><button className="dco-button" disabled={busy} onClick={() => void act(() => leaseAction(lease.id, 'restart'), 'Forward Instance 已重启；Lease ID 与 TTL 保持不变。')}>重启</button><button className="dco-icon-button" title="关闭转发" disabled={busy} onClick={() => void act(() => leaseAction(lease.id, 'close'), 'Lease 已关闭并保留 tombstone。')}>×</button></div>
-  if (instance?.state === 'needs_attention') return <div className="dco-actions"><button className="dco-button" disabled={busy} onClick={() => void act(() => leaseAction(lease.id, 'recheck'), '已重新下发同端口期望状态；不会改端口。')}>重新检查</button><button className="dco-button" disabled={busy} onClick={() => void act(() => leaseAction(lease.id, 'close'), 'Lease 已关闭。')}>关闭</button></div>
-  return <div className="dco-actions"><button className="dco-button dco-primary" disabled={busy || !device.online} onClick={() => void act(() => leaseAction(lease.id, 'recheck'), '已要求 Companion 立即对账。')}>立即重试</button><button className="dco-button" disabled={busy} onClick={() => void act(() => leaseAction(lease.id, 'close'), 'Lease 已关闭。')}>关闭</button></div>
+  return <div className="dco-actions">
+    {instance?.state === 'running' ? <><button className="dco-button dco-primary" onClick={() => openLocal(service)}>打开 localhost</button><button className="dco-button" disabled={busy} onClick={() => void act(() => leaseAction(lease.id, 'restart'), '已提交重启；Lease ID 与 TTL 保持不变。')}>重启</button></> : <button className="dco-button" disabled={busy} onClick={() => void act(() => leaseAction(lease.id, 'recheck'), '已要求 Companion 对账。')}>重新检查</button>}
+    <button className="dco-button" disabled={busy} onClick={() => void act(() => leaseAction(lease.id, 'close'), '停止转发已提交；服务声明保留，等待设备确认。')}>停止转发</button>
+  </div>
+}
+
+function RetiredForwards({ snapshot, busy, runAction }: { snapshot: TaskSnapshotDto; busy: string; runAction(key: string, action: () => Promise<void>, success: string): Promise<void> }) {
+  const activeIds = new Set(snapshot.services.map(service => service.id))
+  const retired = snapshot.leases.filter(lease => !activeIds.has(lease.serviceId))
+  if (!retired.length) return null
+  return <details className="dco-diagnostics"><summary>已注销服务的转发关闭记录（{retired.length}）</summary><div className="dco-diagnostic-body">
+    <p>声明已移除不代表设备端口已停止。离线设备将在重新连接后对账；不会停止 devbox 应用。</p>
+    {retired.map(lease => {
+      const instance = snapshot.instances.find(item => item.leaseId === lease.id && item.generation === lease.generation)
+      const confirmed = isForwardCloseConfirmed(lease, instance)
+      return <div className="dco-service-foot" key={lease.id}>
+        <span>:{lease.localPort} · {snapshot.devices.find(device => device.id === lease.deviceId)?.name ?? lease.deviceId} · {confirmed ? '已确认停止' : '待确认停止'} {instance?.errorCode}</span>
+        {!confirmed && <button className="dco-button" disabled={Boolean(busy)} onClick={() => void runAction('retired:' + lease.id, () => leaseAction(lease.id, 'recheck'), '已重新提交关闭；等待设备确认。')}>重新检查关闭</button>}
+      </div>
+    })}
+  </div></details>
 }
 
 function currentLease(snapshot: TaskSnapshotDto, serviceId: string, deviceId: string): ForwardLeaseDto | undefined {
   return snapshot.leases.filter(item => item.serviceId === serviceId && item.deviceId === deviceId).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]
 }
-function displayState(lease: ForwardLeaseDto | undefined, instance: InstanceDto | undefined, device: DeviceDto | undefined): 'running' | 'closed' | 'starting' | 'recovering' | 'needs_attention' | 'degraded' | 'unforwarded' {
+function displayState(lease: ForwardLeaseDto | undefined, instance: InstanceDto | undefined, device: DeviceDto | undefined): 'running' | 'closed' | 'starting' | 'recovering' | 'needs_attention' | 'degraded' | 'unforwarded' | 'closing' {
   if (!lease) return 'unforwarded'
-  if (lease.desiredState === 'closed') return 'closed'
+  if (lease.desiredState === 'closed') return isForwardCloseConfirmed(lease, instance) ? 'closed' : 'closing'
   if (instance?.state === 'needs_attention') return 'needs_attention'
   if (!device?.online) return 'degraded'
   if (!instance || instance.generation !== lease.generation) return 'starting'
   return instance.state === 'closed' ? 'starting' : instance.state
 }
 function StatePill({ state }: { state: ReturnType<typeof displayState> }) {
-  const copy = { running: '运行中', closed: '已关闭', starting: '启动中', recovering: '自动恢复中', needs_attention: '需要处理', degraded: '设备离线', unforwarded: '未转发' }
+  const copy = { running: '运行中', closed: '已确认停止', closing: '待确认停止', starting: '启动中', recovering: '自动恢复中', needs_attention: '需要处理', degraded: '设备离线', unforwarded: '未转发' }
   return <span className={`dco-pill dco-state-${state}`}><i />{copy[state]}</span>
 }
 function SourcePill({ source }: { source: TaskServiceDto['source'] }) {
@@ -185,7 +211,8 @@ function Summary({ value, label, warning = false }: { value: number; label: stri
 function Fact({ label, value }: { label: string; value: string }) { return <div><span>{label}</span><b>{value}</b></div> }
 function Health({ label, value, good }: { label: string; value: string; good: boolean }) { return <div><i className={good ? 'good' : ''}/><span>{label}</span><b>{value}</b></div> }
 function instanceSummary(instance: InstanceDto | undefined, lease: ForwardLeaseDto): string {
-  if (!instance) return lease.desiredState === 'open' ? '等待 Device 对账' : '无运行实例'
+  if (lease.desiredState === 'closed') return isForwardCloseConfirmed(lease, instance) ? 'SSH 已退出，listener 已消失' : '等待 Device 确认停止'
+  if (!instance) return '等待 Device 对账'
   if (instance.listener === 'owned' && instance.sshChild === 'running') return 'SSH child + listener 已确认'
   if (instance.state === 'recovering') return '等待重建运行实例'
   return '未确认 listener 所有权'
