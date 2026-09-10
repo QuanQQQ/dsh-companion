@@ -147,7 +147,7 @@ export class CompanionDeviceHub {
       const requestId = `list_${randomUUID()}`
       connection.expectedList = requestId
       connection.listRequestedAt = Date.now()
-      await this.service.markDeviceConnected(connection.deviceId)
+      await this.service.markDeviceConnected(connection.deviceId, frame.companionVersion)
       if (!this.isCurrent(connection)) return
       this.send(connection, { v: COMPANION_PROTOCOL_VERSION, type: 'forward.list', ...connection.fence, requestId })
       return

@@ -40,7 +40,7 @@ curl --disable -fsS --proto '=https' https://dsh.example.internal/api/companion/
 
 配对和 Authority 保存在 $DSH_HOME/companion/state.json。同一数据目录的普通停止/启动保留它们；另一个管理项目、清空数据或新建测试 Home 属于不同 Host，不能自动接收旧凭证。开发时应固定 PDM 项目 ID 和 Home；干净包验证 Home 不应充当真实 Device 的长期配对环境。
 
-Device 被拒绝认证时关闭自有 SSH，持久显示 needs_pairing，而非把后台存活当作配对成功。重新执行统一命令会校验并恢复；不复制两个 Host 的数据库、不恢复已撤销的授权。
+Device 被拒绝认证时关闭自有 SSH，持久显示 needs_pairing，而非把后台存活当作配对成功。重新执行统一命令会校验并恢复；不复制两个 Host 的数据库、不恢复已撤销的授权。Device 卡片中的 CLI 版本来自最近一次成功认证的 `device.hello`；Device 升级后须至少连接一次才会刷新。
 
 详细恢复边界见 [统一启动与恢复](docs/macos-cli-update.md)。旧 setup/update 命令仅保留兼容用途，不是推荐用户入口。
 

@@ -31,7 +31,7 @@ async function setup() {
 }
 const running = (leaseId: string, generation = 1): WireInstanceObservation => ({ leaseId, generation, state: 'running', sshChild: 'running', listener: 'owned', remoteProbe: 'healthy' })
 
-async function hubSetup(t: TestContext, heartbeatMs = 1000, reconcileTasks?: () => Promise<void>) {
+async function hubSetup(t: TestContext, heartbeatMs = 1000, reconcileTasks?: () => Promise<void>, companionVersion = '0.1.0') {
   const base = await setup()
   const hub = new CompanionDeviceHub(base.service, [], heartbeatMs, reconcileTasks)
   const server = createServer()
@@ -62,11 +62,17 @@ async function hubSetup(t: TestContext, heartbeatMs = 1000, reconcileTasks?: () 
   const hello = await next('host.hello')
   const fence = { authorityEpoch: hello.authorityEpoch, sessionEpoch: hello.sessionEpoch }
   const send = (frame: Record<string, unknown>) => ws.send(JSON.stringify({ v: 1, ...fence, ...frame }))
-  send({ type: 'device.hello', companionVersion: '0.1.0' })
+  send({ type: 'device.hello', companionVersion })
   const list = await next('forward.list')
   const snapshot = (instances: WireInstanceObservation[] = [], requestId = list.requestId) => send({ type: 'forward.list', requestId, instances })
   return { ...base, hub, ws, frames, next, send, snapshot }
 }
+
+it('persists the authenticated runtime version reported by Device hello', async t => {
+  const h = await hubSetup(t, 1000, undefined, '0.1.9')
+  assert.equal(h.paired.device.companionVersion, '0.1.0')
+  assert.equal(h.service.listDevices()[0]?.companionVersion, '0.1.9')
+})
 
 it('hub sends no open before initial snapshot reconciliation and waits for restart close ACK', async t => {
   const h = await hubSetup(t)

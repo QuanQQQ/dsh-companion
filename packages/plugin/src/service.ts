@@ -208,11 +208,16 @@ export class CompanionService {
     return this.publicDevice(device)
   }
 
-  async markDeviceConnected(deviceId: string): Promise<void> {
+  async markDeviceConnected(deviceId: string, companionVersion: string): Promise<void> {
+    const version = assertNonEmpty(companionVersion, 'companionVersion', 64)
+    if (!/^[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?$/.test(version)) {
+      throw new CompanionError('VALIDATION_ERROR', 'companionVersion must be a semantic version')
+    }
     const now = this.clock.now()
     await this.transact(state => {
       const device = requireDevice(state, deviceId)
       if (device.revokedAt) throw new CompanionError('DEVICE_REVOKED', 'device pairing was revoked', 403)
+      device.companionVersion = version
       device.lastSeenAt = iso(now)
       device.updatedAt = iso(now)
     })

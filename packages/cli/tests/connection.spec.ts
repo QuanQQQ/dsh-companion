@@ -187,3 +187,50 @@ test('real WebSocket handshake recovers after seven HTTP 503 responses and shuts
   await until(()=>f.latest().state==='connected');assert.equal(upgrades,8)
   f.signals.emit('SIGTERM');await f.done
 })
+
+test('real Device reconnects after the Host listener stops and returns on the same port', async t => {
+  const startHost = async (port = 0) => {
+    const server = createServer()
+    const wss = new WebSocketServer({ noServer: true })
+    server.on('upgrade', (req, socket, head) => {
+      assert.equal(req.headers.authorization, 'Bearer dummy-secret-never-log')
+      wss.handleUpgrade(req, socket, head, ws => {
+        ws.send(JSON.stringify({ v: 1, type: 'host.hello', authorityEpoch: 'epoch', sessionEpoch: 'session-'+Date.now(), heartbeatMs: 15000, serverTime: new Date().toISOString() }))
+      })
+    })
+    server.listen(port, '127.0.0.1')
+    await once(server, 'listening')
+    return { server, wss, port: (server.address() as { port: number }).port }
+  }
+  const stopHost = async (host: Awaited<ReturnType<typeof startHost>> | undefined) => {
+    if (!host) return
+    await Promise.all([...host.wss.clients].map(async ws => {
+      const closed = once(ws, 'close')
+      ws.close(1001, 'Host shutting down')
+      await closed
+    }))
+    await new Promise<void>(resolve => host.wss.close(() => resolve()))
+    host.server.closeAllConnections()
+    await new Promise<void>(resolve => host.server.close(() => resolve()))
+  }
+  const until = async (predicate: () => boolean) => {
+    for (let i = 0; i < 2000; i++) { if (predicate()) return; await turn() }
+    throw new Error('network event timeout')
+  }
+  let host = await startHost()
+  let live: Awaited<ReturnType<typeof startHost>> | undefined = host
+  t.after(() => stopHost(live))
+  const f = await fixture(t, { config: { deviceId: 'device', authorityEpoch: 'epoch', serverUrl: 'http://127.0.0.1:'+host.port }, socketFactory: (url, opts) => new WebSocket(url, opts) })
+  await until(() => f.latest().state === 'connected')
+  await stopHost(live); live = undefined
+  await until(() => f.latest().state === 'reconnecting')
+  assert.equal(f.latest().lastCloseCode, 1001)
+  await f.retry()
+  await until(() => f.latest().state === 'reconnecting' && f.latest().lastDisconnectReason === 'NETWORK_ERROR')
+  host = await startHost(host.port); live = host
+  await f.retry()
+  await until(() => f.latest().state === 'connected')
+  assert.equal(host.wss.clients.size, 1)
+  f.signals.emit('SIGTERM'); await f.done
+  await stopHost(live); live = undefined
+})

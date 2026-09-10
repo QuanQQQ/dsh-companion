@@ -82,6 +82,19 @@ describe('pairing and Device identity', () => {
     )
   })
 
+  it('persists the version reported by the current authenticated handshake', async () => {
+    const store = new MemoryCompanionStateStore()
+    const service = await CompanionService.create(store)
+    const paired = await pair(service, 'install-a', 'Device A')
+    assert.equal(paired.device.companionVersion, '0.1.0')
+    await service.markDeviceConnected(paired.device.id, '0.1.9')
+    assert.equal(service.listDevices()[0]?.companionVersion, '0.1.9')
+    const reloaded = await CompanionService.create(store)
+    assert.equal(reloaded.listDevices()[0]?.companionVersion, '0.1.9')
+    await assert.rejects(service.markDeviceConnected(paired.device.id, 'not-a-version'), error => expectCompanionCode(error, 'VALIDATION_ERROR'))
+    assert.equal(service.listDevices()[0]?.companionVersion, '0.1.9')
+  })
+
   it('revokes trust and closes every open Lease without migrating it', async () => {
     const { service } = await setup()
     const device = (await pair(service, 'install-a', 'Mac A')).device

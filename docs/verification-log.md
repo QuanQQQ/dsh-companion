@@ -192,3 +192,17 @@ CLI 139 项、Plugin 67 项通过，类型检查与打包通过。格式检查�
 用户授权合并发布重新开启转发、控制通道持续重连与 Device 统一文案。发布前重新运行两包类型检查、251 项测试（Plugin 88、CLI 163）、构建和 diff 检查，全部通过；分发 bundle 的 --version 为 0.1.9。保留上述 3083 页面、分发与真实 WebSocket 验收证据；没有把模拟睡眠视为真实设备整夜验收。
 
 源码合入 main 并推送后，通过 dsh-companion-package-validation 的 PDM 安全更新队列交付 Host 0.1.11，实际安装和重启等待空闲门禁。精确制品及队列状态以 PDM 返回记录为准。Stable 生效后，Device 须重跑原 Host 的统一启动命令安装 CLI 0.1.9；Host 更新不自动替换 Device 端进程。
+
+## 2026-09-10：Host 0.1.12 开发——握手版本与重启恢复复核
+
+用户提供的统一启动输出表明 Device 端已通过本地 bootId、PID 与状态文件校验启动 CLI 0.1.9。Stable Host 设备列表仍显示 0.1.8，原因是 Host 只在首次配对时保存 companionVersion，后续 device.hello 虽携带运行版本却未更新元数据；此前将设备列表版本解释为当前运行版本不成立。
+
+Host 现于认证成功的 device.hello 中校验并持久化 companionVersion，Device 卡片因而反映最近一次成功握手的运行版本；非法版本拒绝且不覆盖上次有效值。新增服务持久化及真实 Device WebSocket 握手回归。
+
+另新增真实 Node HTTP/WebSocket 测试：CLI 先连接 Host，Host 以 1001 正常停机并完全释放监听端口；CLI 对端口拒绝持续重试，Host 在同一端口恢复后无需 SIGHUP 或重跑命令即可重新握手。该测试通过，说明 CLI 0.1.9 的正常 DSH 重启路径未发现逻辑缺口；首次退避约 2 秒，累计退避最长 30 秒，实际恢复时间还包含 Host 启动耗时。缺少问题发生当时的 Device 本地 status/log，无法判定用户观察是等待不足、当时安装进程差异或其他环境故障。若 0.1.9 再现，应先保留 status 输出与本地日志再重跑统一命令。
+
+3083 隔离 Host 用浏览器工具尝试原生 Authorization WebSocket 功能验收，但运行器隔离了 Node 内建模块，未降低 Host 认证要求或输出 token；三次模拟 Device 均已撤销。服务层、真实 DeviceHub WebSocket 和真实 CLI WebSocket 自动化测试构成当前行为证据。
+
+## 2026-09-10：Host 0.1.12 发布前验证
+
+用户此前已授权发布并要求继续处理重启恢复反馈。发布前重跑两包类型检查、254 项测试（Plugin 90、CLI 164）、两包构建、diff 检查及 dsh-companion-package-validation 的 PDM check，全部通过。Host 0.1.12 仅修正最近认证握手版本的校验、持久化及展示；分发的 Device CLI 保持 0.1.9，控制通道行为未修改。源码合入 main 并推送后通过 PDM 安全更新队列交付，实际安装与 Host 重启等待空闲门禁。
