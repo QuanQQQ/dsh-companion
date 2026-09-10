@@ -349,6 +349,13 @@ export class CompanionService {
         updatedAt: iso(now),
         expiresAt: iso(now + ttlMs),
       }
+      // Expiry may race the periodic sweep. Fence every old owner before the new open.
+      for (const old of state.leases) {
+        if (old.deviceId === result.deviceId && old.localPort === result.localPort && old.desiredState === 'open' && isLeaseExpired(old, now)) {
+          closeLeaseInState(state, old, 'expired', now, this.ids)
+        }
+      }
+      queuePortClosures(state, result, now, this.ids)
       state.leases.push(result)
       state.operations.push({ ...makeOperation(result, 'open', now, this.ids), protocol: service.protocol })
     })
@@ -396,6 +403,7 @@ export class CompanionService {
       if (lease.desiredState === 'open' && isLeaseExpired(lease, now)) {
         closeLeaseInState(state, lease, 'expired', now, this.ids)
       } else {
+        if (lease.desiredState === 'open') queuePortClosures(state, lease, now, this.ids)
         const barrier = state.operations.filter(item => item.leaseId === lease.id && item.kind === 'close' && item.generation === lease.generation - 1).at(-1)
         if (lease.desiredState === 'open' && barrier && (!barrier.acknowledgedAt || barrier.errorCode)) {
           queueOperationIfMissing(state, lease.id, lease.deviceId, barrier.generation, 'close', now, this.ids, true)
@@ -657,8 +665,8 @@ function requireLease(state: CompanionState, leaseId: string): ForwardLease {
 }
 
 function newestLease(state: CompanionState, serviceId: string, deviceId: string): ForwardLease | undefined {
-  return state.leases.filter(lease => lease.serviceId === serviceId && lease.deviceId === deviceId)
-    .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0]
+  // Insertion order remains authoritative when timestamps tie or the wall clock moves back.
+  return state.leases.filter(lease => lease.serviceId === serviceId && lease.deviceId === deviceId).at(-1)
 }
 
 function closeLeaseInState(
@@ -752,6 +760,18 @@ function recordOperationFailure(state: CompanionState, operation: ForwardOperati
   else state.instances.push(observation)
 }
 
+function pendingPortClosures(state: CompanionState, lease: ForwardLease): ForwardLease[] {
+  return state.leases.filter(old => {
+    if (old.id === lease.id || old.deviceId !== lease.deviceId || old.localPort !== lease.localPort || old.desiredState !== 'closed') return false
+    const close = state.operations.filter(op => op.leaseId === old.id && op.deviceId === old.deviceId && op.generation === old.generation && op.kind === 'close').at(-1)
+    return !close?.acknowledgedAt || !!close.errorCode
+  })
+}
+
+function queuePortClosures(state: CompanionState, lease: ForwardLease, now: number, ids: CompanionIds): void {
+  for (const old of pendingPortClosures(state, lease)) queueOperationIfMissing(state, old.id, old.deviceId, old.generation, 'close', now, ids, true)
+}
+
 function isDispatchable(state: CompanionState, operation: ForwardOperation, now: number): boolean {
   if (operation.acknowledgedAt) return false
   if (operation.kind === 'close') return true
@@ -759,6 +779,8 @@ function isDispatchable(state: CompanionState, operation: ForwardOperation, now:
   if (!lease || lease.desiredState !== 'open' || lease.generation !== operation.generation || isLeaseExpired(lease, now)) return false
   if (state.devices.find(item => item.id === lease.deviceId)?.revokedAt) return false
   if (requireService(state, lease.serviceId).archivedAt) return false
+  // A new Lease must not race an unconfirmed old owner of the same Device port.
+  if (pendingPortClosures(state, lease).length) return false
   // Restart opens depend on a successful close ACK, not merely dispatch or a snapshot.
   const close = state.operations.filter(item => item.leaseId === lease.id && item.deviceId === lease.deviceId
     && item.kind === 'close' && item.generation === operation.generation - 1).at(-1)

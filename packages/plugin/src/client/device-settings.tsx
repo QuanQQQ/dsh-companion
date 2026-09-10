@@ -57,24 +57,24 @@ export function DeviceSettings({ close }: SettingsSectionOwnerProps) {
   return <div className="dco-settings">
     <header className="dco-settings-head"><div><span className="dco-eyebrow">LOCALHOST · LEAST PRIVILEGE</span><h3>Companion Devices</h3><p>同一条命令完成首次启动、替换旧版本和失配恢复。不修改 Bifrost 或系统代理。</p></div><button className="dco-button" onClick={close}>完成</button></header>
     <section className="dco-pairing" aria-label="统一启动 Companion">
-      <h4>在 Mac 执行这一条命令</h4>
-      <label>Mac 可访问的 DSH 地址<input aria-label="DSH server origin" value={serverOrigin} onChange={event=>setServerOrigin(event.target.value)} spellCheck={false}/></label>
+      <h4>在 Device 上执行这一条命令</h4>
+      <label>Device 可访问的 DSH 地址<input aria-label="DSH server origin" value={serverOrigin} onChange={event=>setServerOrigin(event.target.value)} spellCheck={false}/></label>
       <label className="dco-checkbox-row"><input type="checkbox" checked={allowHttp} onChange={event=>setAllowHttp(event.target.checked)}/>允许明文 HTTP（仅限可信测试网络；代码和凭证不受 TLS 保护）</label>
-      <p>脚本自动拉取并校验此 Host 的最新版：已有安装就安全替换并重新启动；没有就完成首次启动。需要本机已安装 Node.js 22+，首次会询问 SSH alias。</p>
+      <p>脚本自动拉取并校验此 Host 的最新版：已有安装就安全替换并重新启动；没有就完成首次启动。当前 CLI 支持 macOS，需要设备已安装 Node.js 22+，首次会询问 SSH alias。</p>
       {command ? <><pre><code>{command}</code></pre><button className="dco-button dco-primary" onClick={()=>void copy()}>{copied ? '已复制启动命令' : '复制启动命令'}</button></> : <p>请输入完整 HTTPS origin；可信测试网络的 HTTP 需明确勾选许可。</p>}
       <div className="dco-safety">首次或 Host 改变时，终端显示验证码并打开此页面。核对下面请求后允许即可，不需要下载 CLI 或区分 setup/update。</div>
     </section>
-    <section aria-label="待授权的 Mac"><h4>待授权的 Mac</h4>
+    <section aria-label="待授权的 Device"><h4>待授权的 Device</h4>
       {requests.filter(r=>r.status==='pending'||r.status==='approving').length===0 && <p>暂无待授权请求。运行上方命令后会自动出现。</p>}
       {requests.filter(r=>r.status==='pending'||r.status==='approving').map(request=><article key={request.requestId} className="dco-device-card">
         <div className="dco-device-title"><strong>{request.name}</strong><code>{request.userCode}</code></div>
         <div className="dco-device-meta">{request.osVersion} · {request.architecture} · CLI {request.companionVersion}</div>
-        <label className="dco-checkbox-row"><input type="checkbox" checked={!!confirmed[request.requestId]} onChange={event=>setConfirmed({...confirmed,[request.requestId]:event.target.checked})}/>我已核对验证码与自己的 Mac 终端一致</label>
-        <div className="dco-pair-actions"><button className="dco-button dco-primary" disabled={!confirmed[request.requestId]||busy===request.requestId||request.status!=='pending'} onClick={()=>void decide(request,true)}>允许此 Mac</button><button className="dco-button" disabled={busy===request.requestId||request.status!=='pending'} onClick={()=>void decide(request,false)}>拒绝</button></div>
+        <label className="dco-checkbox-row"><input type="checkbox" checked={!!confirmed[request.requestId]} onChange={event=>setConfirmed({...confirmed,[request.requestId]:event.target.checked})}/>我已核对验证码与自己的 Device 终端一致</label>
+        <div className="dco-pair-actions"><button className="dco-button dco-primary" disabled={!confirmed[request.requestId]||busy===request.requestId||request.status!=='pending'} onClick={()=>void decide(request,true)}>允许此 Device</button><button className="dco-button" disabled={busy===request.requestId||request.status!=='pending'} onClick={()=>void decide(request,false)}>拒绝</button></div>
         <div className="dco-safety">只建立配对，不授予任何转发 Lease。不要批准不认识的请求。</div>
       </article>)}
     </section>
-    <div className="dco-device-list">{loading ? <div className="dco-empty-small">正在读取 Device…</div> : devices.length===0 ? <div className="dco-empty-small">此 Host 尚无配对的 Mac。不同测试数据目录不共享配对；请运行统一命令校验或重新授权。</div> : devices.map(device=><article key={device.id} className={'dco-device-card'+(device.revokedAt?' dco-revoked':'')}>
+    <div className="dco-device-list">{loading ? <div className="dco-empty-small">正在读取 Device…</div> : devices.length===0 ? <div className="dco-empty-small">此 Host 尚无配对的 Device。不同测试数据目录不共享配对；请运行统一命令校验或重新授权。</div> : devices.map(device=><article key={device.id} className={'dco-device-card'+(device.revokedAt?' dco-revoked':'')}>
       <div className="dco-device-title"><strong>{device.name}</strong><span className={'dco-chip '+(device.revokedAt?'dco-chip-muted':device.online?'dco-chip-green':'dco-chip-muted')}>{device.revokedAt?'已撤销':device.online?'在线':'离线'}</span></div>
       <div className="dco-device-meta">macOS {device.osVersion} · {device.architecture} · CLI {device.companionVersion}</div>
       <div className="dco-device-meta">上次在线 {device.lastSeenAt ? new Date(device.lastSeenAt).toLocaleString() : '尚未连接'}</div>

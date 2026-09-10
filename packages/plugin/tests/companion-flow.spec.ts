@@ -158,6 +158,31 @@ async function fixture(t: TestContext, ttlMs = 60_000) {
     waitClosed: async () => { await until(() => closedCode !== undefined, 'revocation socket close'); await disconnect; return closedCode } }
 }
 
+it('reopening waits for the old close ACK and late old commands cannot stop the new tunnel', async t => {
+  const h = await fixture(t)
+  h.sendSnapshot()
+  const first = await h.next('forward.open')
+  await h.ack(first)
+  await h.observed(h.lease.id, 1, 'running')
+  const offset = h.frames.length
+  await h.service.closeLease(h.lease.id)
+  const close = await h.next('forward.close', offset)
+  await h.execute(close) // Local termination is not yet a Host ACK.
+  const fresh = await h.service.openLease({ taskId: h.app.taskId, serviceId: h.app.id, deviceId: h.paired.device.id })
+  assert.notEqual(fresh.id, h.lease.id)
+  assert.equal(h.service.pendingOperations(h.paired.device.id).some(op => op.leaseId === fresh.id), false)
+  assert.equal(h.executor.starts.length, 1)
+  await h.ack(close)
+  const reopened = await h.next('forward.open', offset)
+  assert.equal(reopened.leaseId, fresh.id)
+  await h.ack(reopened)
+  await h.observed(fresh.id, 1, 'running')
+  await h.execute(close)
+  assert.equal((await h.execute(first)).errorCode, 'STALE_GENERATION')
+  assert.equal(h.executor.owned.has(fresh.id), true)
+  assert.equal(h.executor.starts.length, 2)
+})
+
 it('the existing CLI accepts a seven-day deadline over the real WebSocket protocol', async t => {
   const h = await fixture(t, 604_800_000)
   h.sendSnapshot()

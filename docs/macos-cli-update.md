@@ -6,15 +6,21 @@
 curl --disable -fsS --proto '=https' https://YOUR_DSH_HOST/api/companion/bootstrap.sh | bash -s -- https://YOUR_DSH_HOST
 ```
 
-请使用页面生成的真实 origin。需要 Mac 已有 Node.js 22+，初次询问本机 SSH alias。HTTPS 验证不会被绕过；测试 HTTP 必须明确许可。脚本只清理自己创建的临时目录，下载完整 bundle 并核对与脚本绑定的 SHA-256 后执行。SHA-256 不替代 TLS 和对脚本来源的信任。
+请使用页面生成的真实 origin。需要 Device 已有 Node.js 22+，初次询问本机 SSH alias。HTTPS 验证不会被绕过；测试 HTTP 必须明确许可。脚本只清理自己创建的临时目录，下载完整 bundle 并核对与脚本绑定的 SHA-256 后执行。SHA-256 不替代 TLS 和对脚本来源的信任。
 
 ## 首次运行
 
-终端显示非秘密验证码，并打开 DSH。登录后到 Companion Devices，核对自己的 Mac 终端验证码，勾选确认并允许。后台通过随机轮询能力获取凭证并存入 Keychain，不在 argv、URL、配置或日志中放配对秘密。授权请求本身不授予任何 Lease。
+终端显示非秘密验证码，并打开 DSH。登录后到 Companion Devices，核对自己的 Device 终端验证码，勾选确认并允许。后台通过随机轮询能力获取凭证并存入 Keychain，不在 argv、URL、配置或日志中放配对秘密。授权请求本身不授予任何 Lease。
 
 ## 再次运行
 
 拉取当前 Host 的新 bundle，先检查 Host 身份及已保存凭证。有效配对直接安全停止已知旧进程、更新并启动新进程，即使文件版本已相同也重新启动。原配对、配置、Forward Lease 和 Forward Instance 重试预算保留。用户主动运行命令且 Host 验证成功后，可触发一次明确的 WSS 重连，区别于后台自动重试。
+
+## 后台断线恢复
+
+CLI 0.1.9 将控制通道重连与 SSH 转发重试分离。普通断网、心跳超时、HTTP 408/429/5xx 持续退避重连，最长间隔 30 秒；睡眠唤醒后处理已过期的重连计时。不取消 Device 睡眠，不创建新的 Lease，也不延长已有 TTL。旧版达到五次上限的网络计数不再阻止连接。
+
+此修复必须安装到 Device，单独升级 Host 不会替换已运行的 CLI。Host 分发新版后，在 Device 重跑该 Host 页面生成的统一命令，并用已安装 CLI 的 --version 确认版本为 0.1.9 或更新。status 中的 nextReconnectAt、lastDisconnectReason 等是持久诊断，不等同实时在线；安全阻断不会因后台重启自动清除。
 
 ## Host 改变或配对失效
 
@@ -34,4 +40,4 @@ WSS 收到凭证拒绝或 Authority 不匹配时，关闭自有 SSH，记录 nee
 
 ## 测试实例运维
 
-开发固定 PDM 项目 ID 和数据 Home，每个 Home 同时只运行一个 Host。清洁验证/另建项目使用隔离的数据库，不将两个实例的 state.json 合并或共享。稳定 DSH 的变更仍须 PDM 队列，统一 Mac 启动脚本不会更改稳定 Host。
+开发固定 PDM 项目 ID 和数据 Home，每个 Home 同时只运行一个 Host。清洁验证/另建项目使用隔离的数据库，不将两个实例的 state.json 合并或共享。稳定 DSH 的变更仍须 PDM 队列，统一 Device 启动脚本不会更改稳定 Host。

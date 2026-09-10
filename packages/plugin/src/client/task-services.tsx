@@ -101,7 +101,7 @@ export function TaskServicesTab({ scope, visible }: TabComponentProps) {
   return <div className="dco-root" data-dsh-companion-task-services>
     <header className="dco-header">
       <div className="dco-title-row"><span className="dco-mark"><TaskServicesIcon /></span><div><span className="dco-eyebrow">TASK WORKSPACE</span><h2>Task Services</h2></div></div>
-      <p>Task 内 loopback 服务声明与 Mac 转发控制面。不会改动 Bifrost 或系统代理。</p>
+      <p>Task 内 loopback 服务声明与 Device 转发控制面。不会改动 Bifrost 或系统代理。</p>
       {task ? <div className="dco-context"><span><small>当前 Task</small><strong>{task.title}</strong></span><label><small>目标 Device</small><select value={selectedDeviceId} onChange={event => setSelectedDeviceId(event.target.value)}>{devices.map(device => <option key={device.id} value={device.id}>{device.online ? '●' : '○'} {device.name}</option>)}</select></label></div> : <div className="dco-context-note">{error}</div>}
     </header>
 
@@ -143,7 +143,7 @@ function ServiceCard(props: {
 
   return <article className="dco-service-card">
     <div className="dco-service-head"><div><div className="dco-service-title"><strong>{service.name}</strong><span>:{service.port}</span></div><div className="dco-tags"><SourcePill source={service.source}/><span>{service.protocol.toUpperCase()}</span></div></div><StatePill state={state}/></div>
-    <div className="dco-address"><code>Mac 127.0.0.1:{service.port}</code><span>→</span><code>devbox 127.0.0.1:{service.port}</code></div>
+    <div className="dco-address"><code>Device 127.0.0.1:{service.port}</code><span>→</span><code>devbox 127.0.0.1:{service.port}</code></div>
     {lease && <div className="dco-lease-grid"><div><span>Forward Lease</span><b>期望 {lease.desiredState === 'open' ? 'Open' : 'Closed'} · TTL {ttlRemaining(lease.expiresAt)}</b></div><div><span>Forward Instance</span><b>{instanceSummary(instance, lease)}</b></div></div>}
     {instance?.errorCode && <div className={`dco-inline-error ${state === 'needs_attention' ? 'hard' : ''}`}><code>{instance.errorCode}</code><span>{instance.errorMessage ?? 'Forward Instance 运行失败'}</span></div>}
     <div className="dco-service-foot"><div className="dco-evidence" title={service.evidence}>{service.evidence ?? (service.source === 'manual' ? '用户在当前 Task 手动注册' : 'AI 在当前 Task 注册')}</div><ServiceActions service={service} task={task} device={device} lease={lease} instance={instance} busy={busy === actionKey} ttlMinutes={ttlMinutes} act={act}/></div>
@@ -162,11 +162,14 @@ function ServiceCard(props: {
   </article>
 }
 
-function ServiceActions(props: { service: TaskServiceDto; task: TaskSummaryDto; device?: DeviceDto | undefined; lease?: ForwardLeaseDto | undefined; instance?: InstanceDto | undefined; busy: boolean; ttlMinutes: number; act(action: () => Promise<void>, success: string): Promise<void> }) {
+export function ServiceActions(props: { service: TaskServiceDto; task: TaskSummaryDto; device?: DeviceDto | undefined; lease?: ForwardLeaseDto | undefined; instance?: InstanceDto | undefined; busy: boolean; ttlMinutes: number; act(action: () => Promise<void>, success: string): Promise<void> }) {
   const { service, task, device, lease, instance, busy, ttlMinutes, act } = props
   if (!device) return <button className="dco-button dco-primary" disabled>先配对 Device</button>
-  if (lease?.desiredState === 'closed' && !isForwardCloseConfirmed(lease, instance)) return <button className="dco-button" disabled={busy} onClick={() => void act(() => leaseAction(lease.id, 'recheck'), '已重新提交关闭；等待设备确认。')}>重新检查关闭</button>
-  if (!lease || lease.desiredState === 'closed') return <button className="dco-button dco-primary" disabled={!device.online || busy} onClick={() => void act(() => openLease(task.id, service.id, device.id, ttlMinutes), '已创建 TTL-bound Forward Lease。')}>转发到此设备</button>
+  if (lease?.desiredState === 'closed') return <div className="dco-actions">
+    <button className="dco-button dco-primary" disabled={busy || Boolean(device.revokedAt) || task.status === 'archived'} onClick={() => void act(() => openLease(task.id, service.id, device.id, ttlMinutes), '已申请新的转发授权，TTL 从现在计时；Device 联机后先确认旧转发关闭，再开启。')}>重新开启转发</button>
+    {!isForwardCloseConfirmed(lease, instance) && <button className="dco-button" disabled={busy} onClick={() => void act(() => leaseAction(lease.id, 'recheck'), '已重新提交关闭；等待设备确认。')}>重新检查关闭</button>}
+  </div>
+  if (!lease) return <button className="dco-button dco-primary" disabled={!device.online || busy} onClick={() => void act(() => openLease(task.id, service.id, device.id, ttlMinutes), '已创建 TTL-bound Forward Lease。')}>转发到此设备</button>
   return <div className="dco-actions">
     {instance?.state === 'running' ? <><button className="dco-button dco-primary" onClick={() => openLocal(service)}>打开 localhost</button><button className="dco-button" disabled={busy} onClick={() => void act(() => leaseAction(lease.id, 'restart'), '已提交重启；Lease ID 与 TTL 保持不变。')}>重启</button></> : <button className="dco-button" disabled={busy} onClick={() => void act(() => leaseAction(lease.id, 'recheck'), '已要求 Companion 对账。')}>重新检查</button>}
     <button className="dco-button" disabled={busy} onClick={() => void act(() => leaseAction(lease.id, 'close'), '停止转发已提交；服务声明保留，等待设备确认。')}>停止转发</button>
@@ -190,8 +193,8 @@ function RetiredForwards({ snapshot, busy, runAction }: { snapshot: TaskSnapshot
   </div></details>
 }
 
-function currentLease(snapshot: TaskSnapshotDto, serviceId: string, deviceId: string): ForwardLeaseDto | undefined {
-  return snapshot.leases.filter(item => item.serviceId === serviceId && item.deviceId === deviceId).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]
+export function currentLease(snapshot: TaskSnapshotDto, serviceId: string, deviceId: string): ForwardLeaseDto | undefined {
+  return snapshot.leases.filter(item => item.serviceId === serviceId && item.deviceId === deviceId).at(-1)
 }
 function displayState(lease: ForwardLeaseDto | undefined, instance: InstanceDto | undefined, device: DeviceDto | undefined): 'running' | 'closed' | 'starting' | 'recovering' | 'needs_attention' | 'degraded' | 'unforwarded' | 'closing' {
   if (!lease) return 'unforwarded'

@@ -1,3 +1,4 @@
+import { connectionDetails } from './connection.js'
 import { access, lstat, mkdir, open, readdir, readFile, realpath, rm, rmdir } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { arch, hostname, release } from 'node:os'
@@ -232,8 +233,10 @@ async function readDaemonObservation(path: string, deviceId?: string): Promise<R
     const value = raw as Record<string, unknown>
     const states = ['needs_pairing', 'ready', 'connected', 'reconnecting', 'needs_attention', 'cleanup_failed', 'stopped', 'starting', 'connecting']
     if (value.deviceId !== deviceId || typeof value.state !== 'string' || !states.includes(value.state)) return { state: 'invalid_or_different_device' }
-    return { state: value.state, ...(value.pairingRequired === true ? { pairingRequired: true, action: 'Run unified launch and approve this Mac on the intended Host' } : {}), reconnectAttempts: Number.isSafeInteger(value.reconnectAttempts) ? value.reconnectAttempts : null,
+    return { state: value.state, ...(value.pairingRequired === true ? { pairingRequired: true, action: 'Run unified launch and approve this Device on the intended Host' } : {}), reconnectAttempts: Number.isSafeInteger(value.reconnectAttempts) ? value.reconnectAttempts : null,
       pid: Number.isSafeInteger(value.pid) ? value.pid : null,
+      ...connectionDetails(value),
+      ...(typeof value.automaticRetryBlocked === 'boolean' ? { automaticRetryBlocked: value.automaticRetryBlocked } : {}),
       ...(typeof value.companionVersion === 'string' && /^[0-9]+\.[0-9]+\.[0-9]+$/.test(value.companionVersion) ? { companionVersion: value.companionVersion } : {}),
       ...(typeof value.bootId === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value.bootId) ? { bootId: value.bootId } : {}),
       updatedAt: typeof value.updatedAt === 'string' && Number.isFinite(Date.parse(value.updatedAt)) ? new Date(value.updatedAt).toISOString() : null }

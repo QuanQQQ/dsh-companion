@@ -314,9 +314,10 @@ test('persisted daemon status is whitelisted, labelled stale, and removed on uni
   await setup(options, f.deps)
   const statusPath = join(f.paths.root, 'daemon-status.json')
   await writeFile(statusPath, JSON.stringify({ state: 'needs_attention', deviceId: 'dev_fixture', pid: 123, reconnectAttempts: 6,
-    updatedAt: '2026-01-01T00:00:00.000Z', token }))
+    updatedAt: '2026-01-01T00:00:00.000Z', token, automaticRetryBlocked: false, lastDisconnectReason: 'NETWORK_ERROR',
+    lastDisconnectAt: '2026-01-01T00:00:00.000Z', nextReconnectAt: '2026-01-01T00:00:30.000Z', rawError: token }))
   const report = await status(f.deps)
-  assert.deepEqual(report.daemonObservation, { state: 'needs_attention', pid: 123, reconnectAttempts: 6, updatedAt: '2026-01-01T00:00:00.000Z' })
+  assert.deepEqual(report.daemonObservation, { state: 'needs_attention', pid: 123, reconnectAttempts: 6, updatedAt: '2026-01-01T00:00:00.000Z', automaticRetryBlocked: false, lastDisconnectReason: 'NETWORK_ERROR', lastDisconnectAt: '2026-01-01T00:00:00.000Z', nextReconnectAt: '2026-01-01T00:00:30.000Z' })
   assert.ok(String(report.note).includes('stale'))
   assert.ok(!JSON.stringify(report).includes(token))
   await uninstall(f.deps)
