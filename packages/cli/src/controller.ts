@@ -146,17 +146,16 @@ export class ForwardController {
     })
   }
 
-  private async realize(leaseId: string, fence: Fence, explicit = false): Promise<void> {
+  private async realize(leaseId: string, fence: Fence, _explicit = false): Promise<void> {
     const item = this.instance(leaseId)!
     if (this.expired(item)) { await this.ssh.stop(leaseId); await this.fail(item, 'LEASE_EXPIRED'); return }
     if (!this.matches(fence)) return
     if (await this.ssh.isOwned(leaseId)) return
-    if (!explicit && (item.retryAttempt ?? 0) >= 6) { await this.fail(item, 'RETRY_EXHAUSTED'); return }
     const portOwner = this.store.snapshot().instances.find(other => other.leaseId !== leaseId && other.port === item.port
       && other.desiredState === 'open' && !this.expired(other))
     if (portOwner) { await this.fail(item, 'LOCAL_PORT_IN_USE'); return }
     await this.ssh.stop(leaseId)
-    await this.store.patch(leaseId, { state: 'starting', retryAttempt: (item.retryAttempt ?? 0) + 1 })
+    await this.store.patch(leaseId, { state: 'starting', retryAttempt: Math.min(Number.MAX_SAFE_INTEGER - 4, (item.retryAttempt ?? 0) + 1) })
     try {
       if (!this.matches(fence) || !this.enabled.has(leaseId)) return
       if (this.expired(item)) { await this.ssh.stop(leaseId); await this.fail(item, 'LEASE_EXPIRED'); return }
@@ -172,7 +171,7 @@ export class ForwardController {
         await this.fail(item, this.expired(item) ? 'LEASE_EXPIRED' : 'LINK_LOST')
         return
       }
-      await this.store.patch(leaseId, { state: 'running', sshChild: 'running', listener: 'owned', remoteProbe: 'disabled',
+      await this.store.patch(leaseId, { state: 'running', sshChild: 'running', listener: 'owned', remoteProbe: 'disabled', retryAttempt: 0,
         processId: child.pid, controlPath: child.controlPath, errorCode: undefined, errorMessage: undefined, retryAt: undefined })
     } catch (error) {
       await this.ssh.stop(leaseId)
@@ -182,13 +181,12 @@ export class ForwardController {
   }
   private async fail(item: RuntimeInstance, code: string): Promise<void> {
     const attempts = this.instance(item.leaseId)?.retryAttempt ?? 0
-    const exhausted = attempts >= 6
     if (code === 'SSH_PORT_IN_USE') code = 'LOCAL_PORT_IN_USE'
     if (code === 'SSH_HOST_KEY_FAILED') code = 'HOST_KEY_FAILED'
-    const attention = !transient.has(code) || exhausted
+    const attention = !transient.has(code)
     await this.store.patch(item.leaseId, { state: attention ? 'needs_attention' : 'recovering', sshChild: 'exited',
       listener: code === 'LOCAL_PORT_IN_USE' ? 'conflict' : 'missing', processId: undefined, controlPath: '',
-      errorCode: exhausted && transient.has(code) ? 'RETRY_EXHAUSTED' : code,
+      errorCode: code,
       errorMessage: 'Forward realization failed; inspect local Companion diagnostics.',
       retryAt: attention ? undefined : new Date(this.now() + Math.min(30_000, 1000 * 2 ** Math.min(attempts, 5))).toISOString() })
   }

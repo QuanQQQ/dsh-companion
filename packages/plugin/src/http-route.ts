@@ -6,7 +6,6 @@ import { CompanionEnrollmentService, EnrollmentError } from './enrollment.js'
 import { CompanionError } from './domain.js'
 import type { CompanionService } from './service.js'
 import { isTrustedCompanionRequest } from './trust.js'
-import type { TaskWorkspaceResolver } from './task-resolver.js'
 
 export const COMPANION_API_PREFIX = '/api/companion'
 export const DEFAULT_MAX_JSON_BODY_BYTES = 64 * 1024
@@ -26,7 +25,7 @@ export function createCompanionHttpRoute(
   service: CompanionService,
   trustedHosts: readonly string[],
   maxBodyBytes = DEFAULT_MAX_JSON_BODY_BYTES,
-  resolver?: TaskWorkspaceResolver,
+  _legacyTaskResolver?: unknown,
   cliBundleUrl = new URL('./companion-cli.mjs', import.meta.url),
   authentication?: CompanionRequestAuthenticator,
   enrollment = new CompanionEnrollmentService(service),
@@ -103,11 +102,14 @@ export function createCompanionHttpRoute(
           sendJson(res, 200, { ok: true, devices: service.listDevices() })
           return
         }
+        if (req.method === 'GET' && relative === '/snapshot') {
+          sendJson(res, 200, { ok: true, snapshot: service.list() })
+          return
+        }
         const taskMatch = /^\/tasks\/([^/]+)$/.exec(relative)
         if (req.method === 'GET' && taskMatch) {
-          const taskId = decodeRouteId(taskMatch[1])
-          await requireTask(resolver, taskId, false)
-          sendJson(res, 200, { ok: true, snapshot: service.listTask(taskId) })
+          // Compatibility endpoint for cached clients; the requested Task no longer scopes data.
+          sendJson(res, 200, { ok: true, snapshot: { ...service.list(), taskId: decodeRouteId(taskMatch[1]) } })
           return
         }
         if (req.method !== 'POST') {
@@ -160,35 +162,34 @@ export function createCompanionHttpRoute(
           sendJson(res, 200, { ok: true, device: await service.revokeDevice(decodeRouteId(revokeMatch[1])) })
           return
         }
-        const serviceMatch = /^\/tasks\/([^/]+)\/services$/.exec(relative)
-        if (serviceMatch) {
-          await requireTask(resolver, decodeRouteId(serviceMatch[1]), true)
-          const taskService = await service.registerTaskService({
-            taskId: decodeRouteId(serviceMatch[1]),
+        const legacyServiceMatch = /^\/tasks\/([^/]+)\/services$/.exec(relative)
+        if (relative === '/services' || legacyServiceMatch) {
+          if (legacyServiceMatch) decodeRouteId(legacyServiceMatch[1])
+          const registered = await service.registerService({
             name: requiredString(body.name, 'name'),
             port: requiredInteger(body.port, 'port'),
             protocol: requireProtocol(body.protocol),
             source: 'manual',
             evidence: optionalString(body.evidence, 'evidence'),
           })
-          sendJson(res, 201, { ok: true, service: taskService })
+          sendJson(res, 201, { ok: true, service: registered })
           return
         }
-        const unregisterMatch = /^\/tasks\/([^/]+)\/services\/([^/]+)\/unregister$/.exec(relative)
-        if (unregisterMatch) {
-          const taskId = decodeRouteId(unregisterMatch[1])
-          await requireTask(resolver, taskId, false)
-          const removed = await service.unregisterTaskService(taskId, decodeRouteId(unregisterMatch[2]))
+        const unregisterMatch = /^\/services\/([^/]+)\/unregister$/.exec(relative)
+        const legacyUnregisterMatch = /^\/tasks\/([^/]+)\/services\/([^/]+)\/unregister$/.exec(relative)
+        if (unregisterMatch || legacyUnregisterMatch) {
+          if (legacyUnregisterMatch) decodeRouteId(legacyUnregisterMatch[1])
+          const removed = await service.unregisterService(decodeRouteId(unregisterMatch?.[1] ?? legacyUnregisterMatch?.[2]))
           sendJson(res, 200, { ok: true, service: removed,
-            leases: service.listTask(taskId).leases.filter(lease => lease.serviceId === removed.id) })
+            leases: service.list().leases.filter(lease => lease.serviceId === removed.id) })
           return
         }
-        const openMatch = /^\/tasks\/([^/]+)\/services\/([^/]+)\/leases$/.exec(relative)
-        if (openMatch) {
-          await requireTask(resolver, decodeRouteId(openMatch[1]), true)
+        const openMatch = /^\/services\/([^/]+)\/leases$/.exec(relative)
+        const legacyOpenMatch = /^\/tasks\/([^/]+)\/services\/([^/]+)\/leases$/.exec(relative)
+        if (openMatch || legacyOpenMatch) {
+          if (legacyOpenMatch) decodeRouteId(legacyOpenMatch[1])
           const lease = await service.openLease({
-            taskId: decodeRouteId(openMatch[1]),
-            serviceId: decodeRouteId(openMatch[2]),
+            serviceId: decodeRouteId(openMatch?.[1] ?? legacyOpenMatch?.[2]),
             deviceId: requiredString(body.deviceId, 'deviceId'),
             ttlMs: optionalInteger(body.ttlMs, 'ttlMs'),
           })
@@ -199,11 +200,6 @@ export function createCompanionHttpRoute(
         if (leaseActionMatch) {
           const leaseId = decodeRouteId(leaseActionMatch[1])
           const action = leaseActionMatch[2]
-          if (action !== 'close') {
-            const owned = service.snapshot().leases.find(item => item.id === leaseId)
-            if (!owned) throw new CompanionError('NOT_FOUND', 'Forward Lease not found', 404)
-            await requireTask(resolver, owned.taskId, action === 'restart' || owned.desiredState === 'open')
-          }
           const lease = action === 'close'
             ? await service.closeLease(leaseId)
             : action === 'restart'
@@ -223,13 +219,6 @@ export function createCompanionHttpRoute(
       }
     },
   }
-}
-
-async function requireTask(resolver: TaskWorkspaceResolver | undefined, taskId: string, active: boolean): Promise<void> {
-  if (!resolver) throw new CompanionError('NOT_FOUND', 'Task Workspace public API is unavailable', 503)
-  const task = (await resolver.list()).find(item => item.id === taskId)
-  if (!task) throw new CompanionError('NOT_FOUND', 'Task not found', 404)
-  if (active && task.status === 'archived') throw new CompanionError('VALIDATION_ERROR', 'archived Tasks cannot register or forward services', 409)
 }
 
 async function readJsonObject(req: IncomingMessage, maxBodyBytes: number): Promise<Record<string, unknown>> {

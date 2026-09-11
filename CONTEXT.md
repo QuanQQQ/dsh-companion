@@ -1,6 +1,6 @@
 # DSH Companion
 
-DSH Companion governs explicit, Task-scoped permission for a paired macOS Device to expose a devbox loopback service on the same loopback port. It separates declared services, forwarding authority, and observed runtime state so recovery cannot silently broaden access.
+DSH Companion governs explicit Host-global permission for a paired macOS Device to expose a devbox loopback service on the same loopback port. It separates declared services, forwarding authority, and observed runtime state so recovery cannot silently broaden access.
 
 ## Trust and Devices
 
@@ -30,37 +30,37 @@ The identity of one Host authority lineage. A Device rejects commands from an au
 _Avoid_: Server version
 
 **Connection Session**:
-One authenticated online relationship between a Host and a Device. Commands from an older Connection Session are stale even when their Lease generation matches.
+One authenticated online relationship between a Host and a Device. Commands from an older Connection Session are stale even when their Lease generation matches. A new Connection Session starts with an empty enabled-Lease set, so the Host must reissue fenced Open operations for valid non-running Desired State.
 _Avoid_: Pairing, Device
 
-## Task Services and Forwarding
+## Services and Forwarding
 
-**Task Service**:
-A Task-owned declaration that a service is expected on a devbox loopback port. Its existence is not permission to expose that port on any Device.
-_Avoid_: Tunnel, Forward
+**Service**:
+A Host-global declaration that a service is expected on a devbox loopback port. One active declaration exists per port. A Service is independent of Task, Session, and Agent cwd; its existence is not permission to expose the port on any Device.
+_Avoid_: Task Service, Tunnel, Forward
 
-**Task Service Registration**:
-Creation or refresh of a Task Service declaration. Registration never opens a Forward Lease.
+**Service Registration**:
+Creation or refresh of the active Service for a port. Registration never opens a Forward Lease. Compatibility tool names retain the `task_` prefix but do not create a Task scope.
 _Avoid_: Forwarding, authorization
 
-**Task Service Unregistration**:
-Retirement of one declaration and atomic revocation of all its Device Leases. Close records and observations remain queryable; no devbox application process is stopped. Registering the same port again creates a fresh declaration without inheriting authorization.
+**Service Unregistration**:
+Retirement of one declaration and atomic revocation of all its Device Leases. Close records and observations remain queryable; no devbox application process is stopped. Registering the same port afterward creates a fresh declaration without inheriting authorization.
 _Avoid_: Device unpairing, process shutdown
 
 **Forward Close**:
-Revocation of one Lease while retaining its service declaration and other Device Leases. Listener shutdown is confirmed only by a matching-generation observation reporting closed, SSH exited, and listener missing; Desired Closed alone is not confirmation.
+Revocation of one Lease while retaining its Service declaration and other Device Leases. Listener shutdown is confirmed only by a matching-generation observation reporting closed, SSH exited, and listener missing; Desired Closed alone is not confirmation.
 _Avoid_: Service deletion, synchronous shutdown proof
 
 **Forward Lease**:
-A time-bounded authorization for one Task Service on one Device. A Lease fixes both ends to loopback and requires the Device port to equal the Task Service port.
+A time-bounded authorization for one Service on one Device. A Lease fixes both ends to loopback and requires the Device port to equal the Service port. Task and Session lifecycle changes do not alter a Lease.
 _Avoid_: Tunnel, connection
 
 **Forward Instance**:
 The Device-side runtime realization of a Forward Lease. An Instance may be absent or unhealthy while its Lease remains valid.
-_Avoid_: Lease, Task Service
+_Avoid_: Lease, Service
 
 **Desired State**:
-The Host-authoritative intent for a Forward Lease to be open or closed. Desired State can change only through an authorized Host action or a safety boundary such as expiry, revocation, or Task archival.
+The Host-authoritative intent for a Forward Lease to be open or closed. Desired State can change only through an authorized Host action or a safety boundary such as expiry, Device revocation, or Service unregistration.
 _Avoid_: Runtime status
 
 **Observed State**:
@@ -72,7 +72,7 @@ A monotonically increasing fence for changes to one Forward Lease. An observatio
 _Avoid_: Retry count, version
 
 **Forward Operation**:
-An idempotent Host instruction to converge one Forward Lease generation. Reusing its identity with different meaning is invalid.
+An idempotent Host instruction to converge one Forward Lease generation. Reusing its identity with different meaning is invalid. Unacknowledged operations may be retransmitted while their Desired State remains authorized.
 _Avoid_: Request, command attempt
 
 **Close Tombstone**:
@@ -82,7 +82,7 @@ _Avoid_: Deleted Lease
 ## Health and Recovery
 
 **Reconciliation**:
-Comparison of Desired State with Observed State followed by bounded convergence work. Reconciliation cannot grant permission, extend expiry, choose another Device, or change a port.
+Comparison of Desired State with Observed State followed by convergence work. Reconciliation cannot grant permission, extend expiry, choose another Device, or change a port. Running is the only converged Open observation at Connection Session startup; starting or recovering requires a fresh fenced Open so the Device re-enables that Lease for the new session.
 _Avoid_: Failover, authorization
 
 **Health Observation**:
@@ -90,7 +90,7 @@ The combined evidence for Device connectivity, SSH child state, local listener o
 _Avoid_: Online status
 
 **Recovery Classification**:
-The decision that a failure is either transient and eligible for bounded retry, or needs attention and requires a human or new authority. Port conflict, authentication failure, Host Key failure, revocation, policy refusal, Task archival, and Lease expiry need attention.
+Transient control-channel and Forward Instance failures retry continuously with bounded delay while the Lease remains valid. Authentication failure, Host Key failure, port conflict, policy refusal, Device revocation, Service unregistration, and Lease expiry require attention. Recovery never creates or renews authority.
 _Avoid_: Error severity
 
 **Lease Expiry**:

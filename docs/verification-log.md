@@ -206,3 +206,13 @@ Host 现于认证成功的 device.hello 中校验并持久化 companionVersion�
 ## 2026-09-10：Host 0.1.12 发布前验证
 
 用户此前已授权发布并要求继续处理重启恢复反馈。发布前重跑两包类型检查、254 项测试（Plugin 90、CLI 164）、两包构建、diff 检查及 dsh-companion-package-validation 的 PDM check，全部通过。Host 0.1.12 仅修正最近认证握手版本的校验、持久化及展示；分发的 Device CLI 保持 0.1.9，控制通道行为未修改。源码合入 main 并推送后通过 PDM 安全更新队列交付，实际安装与 Host 重启等待空闲门禁。
+
+## 2026-09-11：Host 0.1.13 / CLI 0.1.10 开发——全局服务与持续转发恢复
+
+用户确认服务注册不需要 Task 维度，并反馈普通转发断线后必须手动“重新检查”。代码复核发现三项相互叠加的原因：CLI Forward Instance 在连续六次实现失败后写入 RETRY_EXHAUSTED；Host operation 在三次未确认投递后写入 DELIVERY_EXHAUSTED；新 Device Connection Session 清空 enabled Lease 集合后上报 persisted recovering，Host 却把 starting/recovering 当作已收敛，因而不再下发 Open。
+
+Host 0.1.13 将 Service 与 Lease 改为 Host 全局状态，移除 Task Workspace 运行依赖和 cwd 解析；state schema v2 在首次加载时按端口折叠 v1 Task 声明并原子写回。全局 UI 使用 `/api/companion/snapshot` 与 `/api/companion/services`；旧 task_ 工具名、Sidebar tab id 和 `/tasks/:taskId/...` HTTP 路径作为不参与 scope 的兼容入口。Task、Session 结束或归档不再关闭 Lease。
+
+CLI 0.1.10 对 SSH_EXITED、启动/命令超时、LINK_LOST 和 LISTENER_MISSING 持续退避重试，最长间隔 30 秒，成功后连续失败计数归零。Host 持续重发未确认的幂等 operation，并把新 Connection Session 的 recovering/starting 视为需要 fresh fenced Open；旧 CLI 上报 RETRY_EXHAUSTED 时也能由 Host 自动重新启用。认证、Host Key、端口冲突、策略、撤销和到期仍不自动绕过。
+
+本地 `pnpm -r check` 通过：Plugin 92 项、CLI 164 项，类型检查和两包构建成功；插件 PDM check 也通过 92 项，分发 bundle `--version` 为 0.1.10。`dsh-companion-lifecycle-test`（http://127.0.0.1:3083/）以既有 v1 Home 启动并迁移，浏览器无 console error；在一个 Session 注册 `Global smoke service:55201` 后，另一个 Session 的 Local Services 立即看到同一声明，随后注销并重启 Host，迁移后的全局空列表与历史关闭记录仍可加载。没有在该隔离 Home 配对真实 Mac，因此真实断网、睡眠唤醒和 Apple SSH 行为仍须按 macOS 验收清单执行。本轮未提交、未发布、未排队或修改 Stable。

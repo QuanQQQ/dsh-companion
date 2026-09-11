@@ -36,9 +36,8 @@ async function pair(service: CompanionService, installationId: string, name: str
   })
 }
 
-async function registerVite(service: CompanionService, taskId = 'task-a') {
-  return service.registerTaskService({
-    taskId,
+async function registerVite(service: CompanionService) {
+  return service.registerService({
     name: 'Vite dev server',
     port: 5173,
     protocol: 'http',
@@ -99,7 +98,7 @@ describe('pairing and Device identity', () => {
     const { service } = await setup()
     const device = (await pair(service, 'install-a', 'Mac A')).device
     const taskService = await registerVite(service)
-    const lease = await service.openLease({ taskId: 'task-a', serviceId: taskService.id, deviceId: device.id })
+    const lease = await service.openLease({ serviceId: taskService.id, deviceId: device.id })
 
     await service.revokeDevice(device.id)
 
@@ -111,12 +110,12 @@ describe('pairing and Device identity', () => {
   })
 })
 
-describe('Task Service and Forward Lease boundaries', () => {
-  it('registers a Task Service without creating authorization or a runtime instance', async () => {
+describe('global Service and Forward Lease boundaries', () => {
+  it('registers a global Service without creating authorization or a runtime instance', async () => {
     const { service } = await setup()
     await registerVite(service)
 
-    const snapshot = service.listTask('task-a')
+    const snapshot = service.list()
     assert.equal(snapshot.services.length, 1)
     assert.equal(snapshot.leases.length, 0)
     assert.equal(snapshot.instances.length, 0)
@@ -126,10 +125,10 @@ describe('Task Service and Forward Lease boundaries', () => {
     const { service } = await setup()
     const first = (await pair(service, 'install-a', 'Mac A')).device
     const second = (await pair(service, 'install-b', 'Mac B')).device
-    const taskService = await registerVite(service)
+    const registered = await registerVite(service)
 
-    const leaseA = await service.openLease({ taskId: 'task-a', serviceId: taskService.id, deviceId: first.id })
-    const leaseB = await service.openLease({ taskId: 'task-a', serviceId: taskService.id, deviceId: second.id })
+    const leaseA = await service.openLease({ serviceId: registered.id, deviceId: first.id })
+    const leaseB = await service.openLease({ serviceId: registered.id, deviceId: second.id })
 
     assert.notEqual(leaseA.id, leaseB.id)
     assert.equal(leaseA.localPort, 5173)
@@ -138,34 +137,32 @@ describe('Task Service and Forward Lease boundaries', () => {
     assert.equal(leaseB.remotePort, 5173)
   })
 
-  it('treats a Device local port as global and never remaps a conflict', async () => {
+  it('refreshes one Host-global declaration per port regardless of caller context', async () => {
     const { service } = await setup()
     const device = (await pair(service, 'install-a', 'Mac A')).device
-    const first = await registerVite(service, 'task-a')
-    const second = await service.registerTaskService({
-      taskId: 'task-b',
-      name: 'Another Vite',
+    const first = await registerVite(service)
+    const second = await service.registerService({
+      name: 'Renamed Vite',
       port: 5173,
-      protocol: 'http',
+      protocol: 'https',
       source: 'manual',
     })
-    await service.openLease({ taskId: 'task-a', serviceId: first.id, deviceId: device.id })
+    const lease = await service.openLease({ serviceId: second.id, deviceId: device.id })
 
-    await assert.rejects(
-      service.openLease({ taskId: 'task-b', serviceId: second.id, deviceId: device.id }),
-      error => expectCompanionCode(error, 'LOCAL_PORT_IN_USE'),
-    )
-    assert.equal(service.snapshot().leases.length, 1)
-    assert.equal(service.snapshot().leases[0]?.localPort, 5173)
+    assert.equal(second.id, first.id)
+    assert.equal(service.list().services.length, 1)
+    assert.equal(service.list().services[0]?.name, 'Renamed Vite')
+    assert.equal(service.list().services[0]?.protocol, 'https')
+    assert.equal(lease.localPort, 5173)
   })
 
   it('keeps an already-open Lease idempotent and does not extend its TTL', async () => {
     const { service, clock } = await setup()
     const device = (await pair(service, 'install-a', 'Mac A')).device
     const taskService = await registerVite(service)
-    const first = await service.openLease({ taskId: 'task-a', serviceId: taskService.id, deviceId: device.id })
+    const first = await service.openLease({ serviceId: taskService.id, deviceId: device.id })
     clock.advance(20_000)
-    const second = await service.openLease({ taskId: 'task-a', serviceId: taskService.id, deviceId: device.id })
+    const second = await service.openLease({ serviceId: taskService.id, deviceId: device.id })
 
     assert.equal(second.id, first.id)
     assert.equal(second.expiresAt, first.expiresAt)
@@ -178,7 +175,7 @@ describe('generation fencing and reconciliation', () => {
     const { service } = await setup()
     const device = (await pair(service, 'install-a', 'Mac A')).device
     const taskService = await registerVite(service)
-    const opened = await service.openLease({ taskId: 'task-a', serviceId: taskService.id, deviceId: device.id })
+    const opened = await service.openLease({ serviceId: taskService.id, deviceId: device.id })
 
     const restarted = await service.restartLease(opened.id)
     const operations = service.pendingOperations(device.id)
@@ -198,7 +195,7 @@ describe('generation fencing and reconciliation', () => {
     const { service } = await setup()
     const device = (await pair(service, 'install-a', 'Mac A')).device
     const taskService = await registerVite(service)
-    const opened = await service.openLease({ taskId: 'task-a', serviceId: taskService.id, deviceId: device.id })
+    const opened = await service.openLease({ serviceId: taskService.id, deviceId: device.id })
     const restarted = await service.restartLease(opened.id)
 
     const staleAccepted = await service.observeInstance(device.id, {
@@ -230,7 +227,6 @@ describe('generation fencing and reconciliation', () => {
     const device = (await pair(service, 'install-a', 'Mac A')).device
     const taskService = await registerVite(service)
     const opened = await service.openLease({
-      taskId: 'task-a',
       serviceId: taskService.id,
       deviceId: device.id,
       ttlMs: DEFAULT_LEASE_TTL_MS,
@@ -268,11 +264,37 @@ describe('generation fencing and reconciliation', () => {
     assert.equal(operation?.generation, 8)
   })
 
+  it('re-enables an open Lease when a new connection reports persisted recovering state', async () => {
+    const { service } = await setup()
+    const device = (await pair(service, 'install-a', 'Mac A')).device
+    const registered = await registerVite(service)
+    const lease = await service.openLease({ serviceId: registered.id, deviceId: device.id })
+    const original = service.pendingOperations(device.id)[0]!
+    await service.acknowledgeOperation(device.id, original.id, { ok: true })
+
+    assert.equal(await service.reconcileDeviceReport(device.id, [{
+      leaseId: lease.id,
+      deviceId: device.id,
+      generation: lease.generation,
+      state: 'recovering',
+      sshChild: 'exited',
+      listener: 'missing',
+      remoteProbe: 'disabled',
+      errorCode: 'LINK_LOST',
+    }]), 1)
+
+    const pending = service.pendingOperations(device.id)
+    assert.equal(pending.length, 1)
+    assert.equal(pending[0]?.kind, 'open')
+    assert.notEqual(pending[0]?.id, original.id)
+    assert.equal(pending[0]?.generation, lease.generation)
+  })
+
   it('fails closed when a Device reports a generation ahead of Host state', async () => {
     const { service } = await setup()
     const device = (await pair(service, 'install-a', 'Mac A')).device
     const taskService = await registerVite(service)
-    const lease = await service.openLease({ taskId: 'task-a', serviceId: taskService.id, deviceId: device.id })
+    const lease = await service.openLease({ serviceId: taskService.id, deviceId: device.id })
 
     await service.reconcileDeviceReport(device.id, [{
       leaseId: lease.id,
@@ -294,7 +316,7 @@ describe('generation fencing and reconciliation', () => {
     const { service } = await setup()
     const device = (await pair(service, 'install-a', 'Mac A')).device
     const taskService = await registerVite(service)
-    const lease = await service.openLease({ taskId: 'task-a', serviceId: taskService.id, deviceId: device.id })
+    const lease = await service.openLease({ serviceId: taskService.id, deviceId: device.id })
 
     await service.observeInstance(device.id, {
       leaseId: lease.id,

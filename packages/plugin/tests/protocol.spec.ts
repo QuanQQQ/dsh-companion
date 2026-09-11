@@ -13,7 +13,6 @@ import {
 const fence = { authorityEpoch: 'authority-a', sessionEpoch: 'session-a' }
 const lease: ForwardLease = {
   id: 'lease-a',
-  taskId: 'task-a',
   serviceId: 'service-a',
   deviceId: 'device-a',
   localHost: '127.0.0.1',

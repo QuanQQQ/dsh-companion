@@ -68,19 +68,22 @@ it('monotonic deadline closes TTL even when the wall clock moves backwards', asy
   assert.equal(f.store.observations()[0]?.errorCode, 'LEASE_EXPIRED')
 })
 
-it('automatic transient recovery has five retries and permanent failures never retry automatically', async t => {
+it('automatic transient recovery continues past the old retry limit and resets after success', async t => {
   const f = await fixture(t)
   f.ssh.code = 'SSH_EXITED'
-  f.command.expiresAt = '2026-09-07T01:00:00.000Z'
+  f.command.expiresAt = '2026-09-07T02:00:00.000Z'
   await f.controller.execute(f.command)
   for (let i = 0; i < 9; i++) { f.advance(30_000); await f.controller.tick() }
-  assert.equal(f.ssh.starts, 6)
-  assert.equal(f.store.observations()[0]?.errorCode, 'RETRY_EXHAUSTED')
-  await f.controller.execute({ ...f.command, operationId: 'manual', digest: 'd'.repeat(64) })
-  assert.equal(f.ssh.starts, 7)
+  assert.equal(f.ssh.starts, 10)
+  assert.equal(f.store.observations()[0]?.state, 'recovering')
+  assert.equal(f.store.observations()[0]?.errorCode, 'SSH_EXITED')
+  f.ssh.code = ''
   f.advance(30_000)
   await f.controller.tick()
-  assert.equal(f.ssh.starts, 7)
+  assert.equal(f.ssh.starts, 11)
+  assert.equal(f.store.observations()[0]?.state, 'running')
+  assert.equal(f.store.observations()[0]?.retryAttempt, 0)
+
   const second = await fixture(t)
   second.ssh.code = 'SSH_AUTH_FAILED'
   await second.controller.execute(second.command)

@@ -3,7 +3,7 @@ import { test } from 'node:test'
 import { Children, isValidElement, type ReactNode, type ReactElement } from 'react'
 import { CompanionService } from '../src/service.js'
 import { MemoryCompanionStateStore } from '../src/store.js'
-import { ServiceActions, currentLease } from '../src/client/task-services.js'
+import { ServiceActions, currentLease } from '../src/client/services.js'
 
 async function fixture() {
   let now = Date.parse('2026-09-10T00:00:00Z')
@@ -12,8 +12,8 @@ async function fixture() {
   const service = await CompanionService.create(store, { clock })
   const ticket = await service.createPairingTicket()
   const { device } = await service.pairDevice({ code: ticket.code, installationId: 'reopen-test', name: 'Test', osVersion: 'test', architecture: 'test', companionVersion: 'test', capabilities: { protocolVersion: 1, localForward: true, tcpProbe: false } })
-  const app = await service.registerTaskService({ taskId: 'a', name: 'App', port: 5173, protocol: 'http', source: 'manual' })
-  const input = { taskId: 'a', serviceId: app.id, deviceId: device.id }
+  const app = await service.registerService({ name: 'App', port: 5173, protocol: 'http', source: 'manual' })
+  const input = { serviceId: app.id, deviceId: device.id }
   const old = await service.openLease({ ...input, ttlMs: 60_000 })
   return { service, store, clock, app, input, old, advance(ms: number) { now += ms } }
 }
@@ -61,14 +61,14 @@ test('same-millisecond reopen is idempotent and both Host and UI select the new 
   assert.equal(next.createdAt, f.old.createdAt)
   assert.equal(again.id, next.id)
   assert.equal(f.service.snapshot().leases.filter(l => l.desiredState === 'open').length, 1)
-  assert.equal(currentLease(f.service.listTask('a'), f.app.id, f.input.deviceId)?.id, next.id)
+  assert.equal(currentLease(f.service.list(), f.app.id, f.input.deviceId)?.id, next.id)
 })
 
 test('reopening rejects revoked Devices and retired services, without altering the old expiry', async () => {
   for (const action of ['revoke', 'unregister']) {
     const f = await fixture()
     if (action === 'revoke') await f.service.revokeDevice(f.input.deviceId)
-    else await f.service.unregisterTaskService('a', f.app.id)
+    else await f.service.unregisterService(f.app.id)
     await assert.rejects(f.service.openLease(f.input))
     assert.equal(f.service.snapshot().leases.length, 1)
     assert.equal(f.service.snapshot().leases[0]!.expiresAt, f.old.expiresAt)
@@ -86,14 +86,14 @@ function buttons(node: ReactNode): Button[] {
 test('a closed unconfirmed offline Lease exposes an enabled reopen button which requests a new TTL', async t => {
   const f = await fixture()
   await f.service.closeLease(f.old.id)
-  const snapshot = f.service.listTask('a')
+  const snapshot = f.service.list()
   let request: unknown
   let pending = Promise.resolve()
   t.mock.method(globalThis, 'fetch', async (_input: RequestInfo | URL, init?: RequestInit) => {
     request = JSON.parse(String(init?.body))
     return Response.json({ ok: true })
   })
-  const props = { service: f.app, task: { id: 'a', title: 'Task', objective: '', status: 'active', workspacePath: '/a' }, device: { ...snapshot.devices[0]!, online: false }, lease: snapshot.leases[0]!, busy: false, ttlMinutes: 10080, act(action: () => Promise<void>) { pending = action(); return pending } }
+  const props = { service: f.app, device: { ...snapshot.devices[0]!, online: false }, lease: snapshot.leases[0]!, busy: false, ttlMinutes: 10080, act(action: () => Promise<void>) { pending = action(); return pending } }
   const rendered = buttons(ServiceActions(props))
   const reopen = rendered.find(b => b.props.children === '重新开启转发')!
   assert.ok(reopen)
@@ -103,5 +103,4 @@ test('a closed unconfirmed offline Lease exposes an enabled reopen button which 
   await pending
   assert.deepEqual(request, { deviceId: f.input.deviceId, ttlMs: 604_800_000 })
   assert.equal(buttons(ServiceActions({ ...props, busy: true }))[0]!.props.disabled, true)
-  assert.equal(buttons(ServiceActions({ ...props, task: { ...props.task, status: 'archived' } }))[0]!.props.disabled, true)
 })

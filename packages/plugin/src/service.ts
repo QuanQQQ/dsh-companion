@@ -17,14 +17,14 @@ import {
   type ForwardLease,
   type ForwardOperation,
   type PublicDevice,
-  type TaskService,
-  type TaskServiceSource,
-  type TaskSnapshot,
+  type RegisteredService,
+  type ServiceSource,
+  type CompanionSnapshot,
 } from './domain.js'
 import { normalizeState, type CompanionStateStore } from './store.js'
 
-export const MAX_OPERATION_ATTEMPTS = 3
 export const OPERATION_RETRY_MS = 15_000
+const MAX_RECORDED_ATTEMPTS = Number.MAX_SAFE_INTEGER - 4
 
 export interface CompanionClock {
   now(): number
@@ -47,17 +47,15 @@ export interface PairDeviceInput {
   capabilities: DeviceCapabilities
 }
 
-export interface RegisterTaskServiceInput {
-  taskId: string
+export interface RegisterServiceInput {
   name: string
   port: number
   protocol: ApplicationProtocol
-  source: TaskServiceSource
+  source: ServiceSource
   evidence?: string | undefined
 }
 
 export interface OpenLeaseInput {
-  taskId: string
   serviceId: string
   deviceId: string
   ttlMs?: number | undefined
@@ -127,16 +125,13 @@ export class CompanionService {
     return this.state.devices.map(device => this.publicDevice(device))
   }
 
-  listTask(taskId: string): TaskSnapshot {
-    const normalizedTaskId = assertNonEmpty(taskId, 'taskId')
-    const services = this.state.services.filter(service => service.taskId === normalizedTaskId && !service.archivedAt)
+  list(): CompanionSnapshot {
+    const services = this.state.services.filter(service => !service.archivedAt)
     // Archived services still need observable close delivery and recovery diagnostics.
-    const leases = this.state.leases.filter(lease => lease.taskId === normalizedTaskId)
-    const leaseIds = new Set(leases.map(lease => lease.id))
+    const leaseIds = new Set(this.state.leases.map(lease => lease.id))
     return {
-      taskId: normalizedTaskId,
       services: structuredClone(services),
-      leases: structuredClone(leases),
+      leases: structuredClone(this.state.leases),
       instances: structuredClone(this.state.instances.filter(instance => leaseIds.has(instance.leaseId))),
       devices: this.listDevices(),
     }
@@ -256,17 +251,16 @@ export class CompanionService {
     return this.publicDevice(revoked)
   }
 
-  async registerTaskService(input: RegisterTaskServiceInput): Promise<TaskService> {
-    const taskId = assertNonEmpty(input.taskId, 'taskId')
+  async registerService(input: RegisterServiceInput): Promise<RegisteredService> {
     const name = assertNonEmpty(input.name, 'name')
     const port = assertPort(input.port)
     const protocol = validateProtocol(input.protocol)
     const source = validateSource(input.source)
     const evidence = input.evidence?.trim().slice(0, 2_000) || undefined
     const now = this.clock.now()
-    let result!: TaskService
+    let result!: RegisteredService
     await this.transact(state => {
-      const existing = state.services.find(service => service.taskId === taskId && service.port === port && !service.archivedAt)
+      const existing = state.services.find(service => service.port === port && !service.archivedAt)
       if (existing) {
         existing.name = name
         existing.protocol = protocol
@@ -277,7 +271,6 @@ export class CompanionService {
       } else {
         result = {
           id: this.ids.randomId('svc'),
-          taskId,
           name,
           port,
           protocol,
@@ -292,12 +285,10 @@ export class CompanionService {
     return structuredClone(result)
   }
 
-  async unregisterTaskService(taskId: string, serviceId: string): Promise<TaskService> {
-    const normalizedTaskId = assertNonEmpty(taskId, 'taskId')
-    let result!: TaskService
+  async unregisterService(serviceId: string): Promise<RegisteredService> {
+    let result!: RegisteredService
     await this.transact(state => {
       const service = requireService(state, serviceId)
-      if (service.taskId !== normalizedTaskId) throw new CompanionError('NOT_FOUND', 'Task Service does not belong to the requested Task', 404)
       const now = this.clock.now()
       if (!service.archivedAt) {
         service.archivedAt = iso(now)
@@ -319,9 +310,7 @@ export class CompanionService {
     let result!: ForwardLease
     await this.transact(state => {
       const service = requireService(state, input.serviceId)
-      if (service.taskId !== input.taskId || service.archivedAt) {
-        throw new CompanionError('NOT_FOUND', 'Task Service does not belong to the requested Task', 404)
-      }
+      if (service.archivedAt) throw new CompanionError('NOT_FOUND', 'Service is no longer registered', 404)
       const device = requireDevice(state, input.deviceId)
       if (device.revokedAt) throw new CompanionError('DEVICE_REVOKED', 'device pairing was revoked', 403)
 
@@ -341,7 +330,6 @@ export class CompanionService {
 
       result = {
         id: this.ids.randomId('lease'),
-        taskId: service.taskId,
         serviceId: service.id,
         deviceId: device.id,
         localHost: LOOPBACK_HOST,
@@ -367,12 +355,11 @@ export class CompanionService {
     return structuredClone(result)
   }
 
-  async closeLease(leaseId: string, reason: CloseReason = 'user', taskId?: string): Promise<ForwardLease> {
+  async closeLease(leaseId: string, reason: CloseReason = 'user'): Promise<ForwardLease> {
     const now = this.clock.now()
     let result!: ForwardLease
     await this.transact(state => {
       const lease = requireLease(state, leaseId)
-      if (taskId !== undefined && lease.taskId !== taskId) throw new CompanionError('NOT_FOUND', 'Forward Lease does not belong to the current Task', 404)
       if (lease.desiredState === 'open') closeLeaseInState(state, lease, reason, now, this.ids)
       result = lease
     })
@@ -443,41 +430,22 @@ export class CompanionService {
     return count
   }
 
-  async reconcileActiveTasks(activeTaskIds: ReadonlySet<string>): Promise<number> {
-    const now = this.clock.now()
-    let count = 0
-    await this.transact(state => {
-      for (const lease of state.leases) {
-        if (lease.desiredState === 'open' && !activeTaskIds.has(lease.taskId)) {
-          closeLeaseInState(state, lease, 'task_archived', now, this.ids)
-          count += 1
-        }
-      }
-    }, activeTaskIds.size === 0 && this.state.leases.length === 0)
-    return count
-  }
-
   pendingOperations(deviceId: string): ForwardOperation[] {
     return structuredClone(this.state.operations
       .filter(operation => operation.deviceId === deviceId && isDispatchable(this.state, operation, this.clock.now()))
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt)))
   }
 
-  /** Persist the send budget before transport delivery. A crash may consume an attempt, never reset it. */
+  /** Persist each send attempt before delivery so reconnects keep an auditable count. */
   async claimOperation(deviceId: string, operationId: string): Promise<ForwardOperation | undefined> {
     return this.transact(state => {
       const now = this.clock.now()
       const operation = state.operations.find(item => item.id === operationId && item.deviceId === deviceId)
       if (!operation || !isDispatchable(state, operation, now)) return undefined
       if (operation.lastSentAt && now - Date.parse(operation.lastSentAt) < OPERATION_RETRY_MS) return undefined
-      if ((operation.attemptCount ?? 0) >= MAX_OPERATION_ATTEMPTS) {
-        operation.acknowledgedAt = iso(now)
-        operation.errorCode = 'DELIVERY_EXHAUSTED'
-        operation.errorMessage = 'Delivery budget exhausted; explicit recheck or restart required'
-        recordOperationFailure(state, operation, now)
-        return undefined
-      }
-      operation.attemptCount = (operation.attemptCount ?? 0) + 1
+      // Operation identity and generation fencing make retransmission idempotent. Keep
+      // converging while the Lease is valid instead of requiring a manual recheck.
+      operation.attemptCount = Math.min(MAX_RECORDED_ATTEMPTS, (operation.attemptCount ?? 0) + 1)
       operation.lastSentAt = iso(now)
       if (operation.kind === 'open' && !operation.protocol) {
         const lease = requireLease(state, operation.leaseId)
@@ -547,10 +515,13 @@ export class CompanionService {
       for (const lease of state.leases.filter(item => item.deviceId === deviceId)) {
         const report = byLease.get(lease.id)
         if (lease.desiredState === 'open' && !isLeaseExpired(lease, now)) {
-          const converged = report?.generation === lease.generation && ['running', 'starting', 'recovering'].includes(report.state)
+          // A new Connection Session starts with no enabled Lease set. Persisted
+          // starting/recovering state therefore needs a fresh, fenced Open command.
+          const converged = report?.generation === lease.generation && report.state === 'running'
           const observed = state.instances.find(item => item.leaseId === lease.id && item.generation === lease.generation)
-          const attention = observed?.state === 'needs_attention' || isNeedsAttentionCode(observed?.errorCode)
-          if (!converged && !attention && queueOperationIfMissing(state, lease.id, deviceId, lease.generation, 'open', now, this.ids)) queued += 1
+          const recoverable = observed?.state === 'recovering' || isRecoverableForwardCode(observed?.errorCode)
+          const attention = isNeedsAttentionCode(observed?.errorCode) || (observed?.state === 'needs_attention' && !recoverable)
+          if (!converged && !attention && queueOperationIfMissing(state, lease.id, deviceId, lease.generation, 'open', now, this.ids, true)) queued += 1
         } else if (report && report.state !== 'closed') {
           if (queueOperationIfMissing(state, lease.id, deviceId, lease.generation, 'close', now, this.ids)) queued += 1
         }
@@ -647,11 +618,20 @@ function validateProtocol(value: ApplicationProtocol): ApplicationProtocol {
   return value
 }
 
-function validateSource(value: TaskServiceSource): TaskServiceSource {
+function validateSource(value: ServiceSource): ServiceSource {
   if (value !== 'manual' && value !== 'agent' && value !== 'process') {
-    throw new CompanionError('VALIDATION_ERROR', 'unsupported Task Service source')
+    throw new CompanionError('VALIDATION_ERROR', 'unsupported Service source')
   }
   return value
+}
+
+function isRecoverableForwardCode(code: string | undefined): boolean {
+  return code === 'SSH_EXITED'
+    || code === 'SSH_START_TIMEOUT'
+    || code === 'SSH_COMMAND_TIMEOUT'
+    || code === 'LINK_LOST'
+    || code === 'LISTENER_MISSING'
+    || code === 'RETRY_EXHAUSTED'
 }
 
 function requireDevice(state: CompanionState, deviceId: string): Device {
@@ -659,9 +639,9 @@ function requireDevice(state: CompanionState, deviceId: string): Device {
     ?? (() => { throw new CompanionError('DEVICE_NOT_PAIRED', 'Device is not paired', 404) })()
 }
 
-function requireService(state: CompanionState, serviceId: string): TaskService {
+function requireService(state: CompanionState, serviceId: string): RegisteredService {
   return state.services.find(service => service.id === serviceId)
-    ?? (() => { throw new CompanionError('NOT_FOUND', 'Task Service not found', 404) })()
+    ?? (() => { throw new CompanionError('NOT_FOUND', 'Service not found', 404) })()
 }
 
 function requireLease(state: CompanionState, leaseId: string): ForwardLease {

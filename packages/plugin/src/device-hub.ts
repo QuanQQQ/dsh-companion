@@ -55,7 +55,7 @@ export class CompanionDeviceHub {
     private readonly service: CompanionService,
     private readonly trustedHosts: readonly string[],
     private readonly heartbeatMs = DEFAULT_HEARTBEAT_MS,
-    private readonly reconcileTasks?: (() => Promise<void>) | undefined,
+    private readonly reconcileBeforeSnapshot?: (() => Promise<void>) | undefined,
   ) {
     this.unsubscribe = service.subscribe(() => this.flushAll())
   }
@@ -164,7 +164,7 @@ export class CompanionDeviceHub {
       if (frame.requestId !== connection.expectedList) throw new CompanionError('UNAUTHORIZED', 'forward.list request mismatch', 403)
       connection.expectedList = undefined
       connection.reconciled = false
-      await this.reconcileTasks?.()
+      await this.reconcileBeforeSnapshot?.()
       if (!this.isCurrent(connection)) return
       await this.service.reconcileDeviceReport(
         connection.deviceId,

@@ -1,11 +1,13 @@
-export const STATE_VERSION = 1 as const
+export const STATE_VERSION = 2 as const
 export const LOOPBACK_HOST = '127.0.0.1' as const
 export const MIN_LEASE_TTL_MS = 60 * 1_000
 export const MAX_LEASE_TTL_MS = 7 * 24 * 60 * 60 * 1_000
 export const DEFAULT_LEASE_TTL_MS = MAX_LEASE_TTL_MS
 
 export type ApplicationProtocol = 'http' | 'https' | 'tcp'
-export type TaskServiceSource = 'manual' | 'agent' | 'process'
+export type ServiceSource = 'manual' | 'agent' | 'process'
+/** @deprecated Compatibility alias for consumers compiled before services became Host-global. */
+export type TaskServiceSource = ServiceSource
 export type DesiredState = 'open' | 'closed'
 export type ForwardOperationKind = 'open' | 'close'
 export type ForwardInstanceState = 'starting' | 'running' | 'recovering' | 'needs_attention' | 'closed'
@@ -44,22 +46,22 @@ export interface PairingTicket {
   consumedAt?: string | undefined
 }
 
-export interface TaskService {
+export interface RegisteredService {
   id: string
-  taskId: string
   name: string
   port: number
   protocol: ApplicationProtocol
-  source: TaskServiceSource
+  source: ServiceSource
   evidence?: string | undefined
   createdAt: string
   updatedAt: string
   archivedAt?: string | undefined
 }
+/** @deprecated Compatibility alias for consumers compiled before services became Host-global. */
+export type TaskService = RegisteredService
 
 export interface ForwardLease {
   id: string
-  taskId: string
   serviceId: string
   deviceId: string
   localHost: typeof LOOPBACK_HOST
@@ -121,7 +123,7 @@ export interface CompanionState {
   authorityEpoch: string
   pairings: PairingTicket[]
   devices: Device[]
-  services: TaskService[]
+  services: RegisteredService[]
   leases: ForwardLease[]
   tombstones: CloseTombstone[]
   operations: ForwardOperation[]
@@ -132,13 +134,14 @@ export interface PublicDevice extends Omit<Device, 'installationIdHash' | 'token
   online: boolean
 }
 
-export interface TaskSnapshot {
-  taskId: string
-  services: TaskService[]
+export interface CompanionSnapshot {
+  services: RegisteredService[]
   leases: ForwardLease[]
   instances: ForwardInstanceObservation[]
   devices: PublicDevice[]
 }
+/** @deprecated Compatibility alias for consumers compiled before the snapshot became Host-global. */
+export type TaskSnapshot = CompanionSnapshot
 
 export type CompanionErrorCode =
   | 'VALIDATION_ERROR'

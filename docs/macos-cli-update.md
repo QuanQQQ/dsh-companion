@@ -14,13 +14,15 @@ curl --disable -fsS --proto '=https' https://YOUR_DSH_HOST/api/companion/bootstr
 
 ## 再次运行
 
-拉取当前 Host 的新 bundle，先检查 Host 身份及已保存凭证。有效配对直接安全停止已知旧进程、更新并启动新进程，即使文件版本已相同也重新启动。原配对、配置、Forward Lease 和 Forward Instance 重试预算保留。用户主动运行命令且 Host 验证成功后，可触发一次明确的 WSS 重连，区别于后台自动重试。
+拉取当前 Host 的新 bundle，先检查 Host 身份及已保存凭证。有效配对直接安全停止已知旧进程、更新并启动新进程，即使文件版本已相同也重新启动。原配对、配置、Forward Lease 和运行诊断保留。用户主动运行命令且 Host 验证成功后，可触发一次明确的 WSS 重连，区别于后台自动重试。
 
 ## 后台断线恢复
 
-CLI 0.1.9 将控制通道重连与 SSH 转发重试分离。普通断网、心跳超时、HTTP 408/429/5xx 持续退避重连，最长间隔 30 秒；睡眠唤醒后处理已过期的重连计时。不取消 Device 睡眠，不创建新的 Lease，也不延长已有 TTL。旧版达到五次上限的网络计数不再阻止连接。
+CLI 0.1.9 起，普通断网、心跳超时、HTTP 408/429/5xx 持续退避重连，最长间隔 30 秒；睡眠唤醒后处理已过期的重连计时。CLI 0.1.10 起，SSH 退出、启动/命令超时、链路或 listener 丢失等 Forward Instance 瞬态故障也持续退避重试，最长间隔 30 秒，成功后连续失败计数归零。不取消 Device 睡眠，不创建新的 Lease，也不延长已有 TTL。
 
-此修复必须安装到 Device，单独升级 Host 不会替换已运行的 CLI。Host 分发新版后，在 Device 重跑该 Host 页面生成的统一命令，并用已安装 CLI 的 --version 确认版本为 0.1.9 或更新。status 中的 nextReconnectAt、lastDisconnectReason 等是持久诊断，不等同实时在线；安全阻断不会因后台重启自动清除。
+Host 0.1.13 在新的 Connection Session 收到 persisted `recovering` 快照后重新下发 fenced Open，并持续重发未确认的幂等 operation。CLI 与 Host 两端都升级后，普通断线恢复不需要点击“重新检查”。认证、Host Key、端口占用、策略拒绝、撤销和到期仍安全停止自动恢复。
+
+CLI 修复必须安装到 Device；单独升级 Host 不会替换已运行的 CLI。Host 分发新版后，在 Device 重跑该 Host 页面生成的统一命令，并用已安装 CLI 的 `--version` 确认版本为 0.1.10 或更新。status 中的 `nextReconnectAt`、`lastDisconnectReason` 等是持久诊断，不等同实时在线；安全阻断不会因后台重启自动清除。
 
 ## Host 改变或配对失效
 

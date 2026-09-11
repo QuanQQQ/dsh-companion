@@ -10,10 +10,9 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { it, type TestContext } from 'node:test'
 import { WebSocket } from 'ws'
 import { CompanionDeviceHub } from '../src/device-hub.js'
-import { CompanionService, MAX_OPERATION_ATTEMPTS, OPERATION_RETRY_MS } from '../src/service.js'
+import { CompanionService, OPERATION_RETRY_MS } from '../src/service.js'
 import { MemoryCompanionStateStore, normalizeState } from '../src/store.js'
 import { createCompanionHttpRoute } from '../src/http-route.js'
-import type { TaskWorkspaceResolver } from '../src/task-resolver.js'
 import type { HostFrame, WireInstanceObservation } from '../src/protocol.js'
 
 async function setup() {
@@ -25,15 +24,15 @@ async function setup() {
     capabilities: { protocolVersion: 1, localForward: true, tcpProbe: true },
   })
   const paired = await pair()
-  const registered = await service.registerTaskService({ taskId: 'task-a', name: 'App', port: 5173, protocol: 'http', source: 'manual' })
-  const lease = await service.openLease({ taskId: 'task-a', deviceId: paired.device.id, serviceId: registered.id, ttlMs: 60_000 })
+  const registered = await service.registerService({ name: 'App', port: 5173, protocol: 'http', source: 'manual' })
+  const lease = await service.openLease({ deviceId: paired.device.id, serviceId: registered.id, ttlMs: 60_000 })
   return { clock, store, service, pair, paired, registered, lease }
 }
 const running = (leaseId: string, generation = 1): WireInstanceObservation => ({ leaseId, generation, state: 'running', sshChild: 'running', listener: 'owned', remoteProbe: 'healthy' })
 
-async function hubSetup(t: TestContext, heartbeatMs = 1000, reconcileTasks?: () => Promise<void>, companionVersion = '0.1.0') {
+async function hubSetup(t: TestContext, heartbeatMs = 1000, reconcileBeforeSnapshot?: () => Promise<void>, companionVersion = '0.1.0') {
   const base = await setup()
-  const hub = new CompanionDeviceHub(base.service, [], heartbeatMs, reconcileTasks)
+  const hub = new CompanionDeviceHub(base.service, [], heartbeatMs, reconcileBeforeSnapshot)
   const server = createServer()
   server.on('upgrade', hub.route().handler)
   server.listen(0, '127.0.0.1')
@@ -94,7 +93,7 @@ it('hub sends no open before initial snapshot reconciliation and waits for resta
   assert.equal(restarted.expiresAt, h.lease.expiresAt)
 })
 
-it('hub does not send open while Task reconciliation is still pending', async t => {
+it('hub does not send open while pre-snapshot reconciliation is still pending', async t => {
   let release!: () => void
   const pending = new Promise<void>(resolve => { release = resolve })
   const h = await hubSetup(t, 1000, () => pending)
@@ -149,23 +148,22 @@ it('expired authorization is not dispatchable even before the expiry sweep', asy
   assert.equal(await h.service.claimOperation(h.paired.device.id, operation.id), undefined)
 })
 
-it('hub retransmits the identical operation digest within a bounded persistent budget', async t => {
+it('hub retransmits the identical fenced operation past the old three-attempt budget', async t => {
   const h = await hubSetup(t)
   h.snapshot()
   const original = await h.next('forward.open')
-  for (let attempt = 2; attempt <= MAX_OPERATION_ATTEMPTS; attempt++) {
+  for (let attempt = 2; attempt <= 4; attempt++) {
     const offset = h.frames.length
     h.clock.value += OPERATION_RETRY_MS
     await h.service.createPairingTicket()
     const retried = await h.next('forward.open', offset)
     assert.equal(retried.operationId, original.operationId)
     assert.equal(retried.digest, original.digest)
+    assert.equal(h.service.snapshot().operations[0]?.attemptCount, attempt)
   }
-  h.clock.value += OPERATION_RETRY_MS
-  await h.service.createPairingTicket()
-  await delay(20)
-  assert.equal(h.service.snapshot().operations[0]?.errorCode, 'DELIVERY_EXHAUSTED')
-  assert.equal(h.frames.filter(frame => frame.type === 'forward.open').length, MAX_OPERATION_ATTEMPTS)
+  assert.equal(h.service.snapshot().operations[0]?.acknowledgedAt, undefined)
+  assert.equal(h.service.snapshot().operations[0]?.errorCode, undefined)
+  assert.equal(h.frames.filter(frame => frame.type === 'forward.open').length, 4)
 })
 
 it('failed restart close never releases the open barrier', async () => {
@@ -177,22 +175,19 @@ it('failed restart close never releases the open barrier', async () => {
   assert.equal(h.service.pendingOperations(h.paired.device.id).length, 0)
 })
 
-it('delivery budget persists across reload and exhaustion cannot manufacture new operations', async () => {
+it('operation retransmission count persists across reload without exhausting authority', async () => {
   const h = await setup()
   let service = h.service
   const operation = service.pendingOperations(h.paired.device.id)[0]!
-  for (let attempt = 1; attempt <= MAX_OPERATION_ATTEMPTS; attempt++) {
+  for (let attempt = 1; attempt <= 4; attempt++) {
     assert.equal((await service.claimOperation(h.paired.device.id, operation.id))?.attemptCount, attempt)
     assert.equal(await service.claimOperation(h.paired.device.id, operation.id), undefined)
     h.clock.value += OPERATION_RETRY_MS
     service = await CompanionService.create(h.store, { clock: h.clock })
   }
-  assert.equal(await service.claimOperation(h.paired.device.id, operation.id), undefined)
-  assert.equal(service.snapshot().operations[0]?.errorCode, 'DELIVERY_EXHAUSTED')
-  for (let i = 0; i < 5; i++) await service.reconcileDeviceReport(h.paired.device.id, [])
   assert.equal(service.snapshot().operations.length, 1)
-  await service.recheckLease(h.lease.id)
-  assert.equal(service.snapshot().operations.length, 2)
+  assert.equal(service.snapshot().operations[0]?.acknowledgedAt, undefined)
+  assert.equal(service.snapshot().operations[0]?.errorCode, undefined)
   assert.equal(service.snapshot().leases[0]?.expiresAt, h.lease.expiresAt)
 })
 
@@ -207,13 +202,14 @@ it('permanent failures do not create automatic operations but explicit recheck i
   assert.equal(h.service.snapshot().leases[0]?.generation, 1)
 })
 
-it('needs_attention snapshot does not automatically reset a successful operation', async () => {
+it('legacy RETRY_EXHAUSTED snapshots automatically receive a fresh fenced Open', async () => {
   const h = await setup()
   await h.service.acknowledgeOperation(h.paired.device.id, h.service.pendingOperations(h.paired.device.id)[0]!.id, { ok: true })
   await h.service.reconcileDeviceReport(h.paired.device.id, [{ ...running(h.lease.id), deviceId: h.paired.device.id, state: 'needs_attention', errorCode: 'RETRY_EXHAUSTED' }])
-  assert.equal(h.service.snapshot().operations.length, 1)
+  assert.equal(h.service.snapshot().operations.length, 2)
+  assert.deepEqual(h.service.pendingOperations(h.paired.device.id).map(item => item.kind), ['open'])
   await h.service.reconcileDeviceReport(h.paired.device.id, [])
-  assert.equal(h.service.snapshot().operations.length, 1)
+  assert.equal(h.service.snapshot().operations.length, 2)
 })
 
 for (const rejection of [401, 403] as const) it('management HTTP enforces Connection authentication rejection ' + rejection, async t => {
@@ -250,25 +246,22 @@ it('missing Connection auth fails management closed but one-use pairing remains 
   assert.equal((await post(body)).status, 409)
 })
 
-it('unknown and archived HTTP Tasks fail closed; close remains available', async t => {
+it('global management is independent of Task existence while legacy paths stay compatible', async t => {
   const h = await setup()
-  let status = 'active'
-  const resolver: TaskWorkspaceResolver = { async list() { return [{ id: 'task-a', status, workspacePath: '/task-a' }] }, async resolveFromCwd() { return undefined } }
-  const route = createCompanionHttpRoute(h.service, [], undefined, resolver, undefined, { requestRejection: () => undefined })
+  const route = createCompanionHttpRoute(h.service, [], undefined, undefined, undefined, { requestRejection: () => undefined })
   const server = createServer((req, res) => void route.handler(req, res))
   server.listen(0, '127.0.0.1'); await once(server, 'listening')
   t.after(() => new Promise<void>(resolve => server.close(() => resolve())))
   const base = 'http://127.0.0.1:' + (server.address() as { port: number }).port + '/api/companion'
   const post = (path: string, body = {}) => fetch(base + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
-  assert.equal((await post('/tasks/missing/services', { name: 'Bad', port: 1000, protocol: 'http' })).status, 404)
-  assert.equal((await fetch(base + '/tasks/missing')).status, 404)
-  status = 'archived'
-  assert.equal((await post('/tasks/task-a/services', { name: 'Bad', port: 1000, protocol: 'http' })).status, 409)
-  assert.equal((await post('/tasks/task-a/services/' + h.registered.id + '/leases', { deviceId: h.paired.device.id })).status, 409)
-  assert.equal((await post('/leases/' + h.lease.id + '/restart')).status, 409)
-  assert.equal((await post('/leases/' + h.lease.id + '/recheck')).status, 409)
+  assert.equal((await fetch(base + '/snapshot')).status, 200)
+  assert.equal((await fetch(base + '/tasks/nonexistent-or-archived')).status, 200)
+  assert.equal((await post('/tasks/nonexistent-or-archived/services', { name: 'Legacy client', port: 1000, protocol: 'http' })).status, 201)
+  assert.equal((await post('/tasks/nonexistent-or-archived/services/' + h.registered.id + '/leases', { deviceId: h.paired.device.id })).status, 201)
+  assert.equal((await post('/leases/' + h.lease.id + '/restart')).status, 200)
+  assert.equal((await post('/leases/' + h.lease.id + '/recheck')).status, 200)
   assert.equal((await post('/leases/' + h.lease.id + '/close')).status, 200)
-  assert.equal(h.service.snapshot().services.length, 1)
+  assert.equal(h.service.list().services.length, 2)
 })
 
 it('persisted state rejects malformed fields, authority relationships and duplicate identities', async () => {
@@ -280,7 +273,7 @@ it('persisted state rejects malformed fields, authority relationships and duplic
     s => { s.leases[0].remoteHost = '0.0.0.0' }, s => { s.leases[0].remotePort = 9999 }, s => { s.leases[0].taskId = 'another-task' },
     s => { s.leases[0].expiresAt = 'not-a-date' }, s => { s.leases[0].generation = 0 }, s => { s.leases[0].generation = 3 }, s => { s.leases[0].generation = Number.MAX_SAFE_INTEGER },
     s => { s.leases[0].desiredState = 'whatever' }, s => { s.leases[0].deviceId = 'missing' }, s => { s.operations[0].deviceId = 'missing' },
-    s => { s.operations[0].attemptCount = 4 }, s => { s.services[0].sshArgs = ['-R'] }, s => { s.devices[0].capabilities.localForward = false },
+    s => { s.operations[0].attemptCount = -1 }, s => { s.services[0].sshArgs = ['-R'] }, s => { s.devices[0].capabilities.localForward = false },
     s => { s.instances.push({ ...running(s.leases[0].id, 2), deviceId: s.devices[0].id, observedAt: s.leases[0].createdAt }) },
   ]
   for (const corrupt of corruptions) { const state = structuredClone(valid); corrupt(state); assert.throws(() => normalizeState(state), /invalid/) }

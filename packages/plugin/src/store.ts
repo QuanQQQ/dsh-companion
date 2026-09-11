@@ -14,7 +14,9 @@ export class JsonCompanionStateStore implements CompanionStateStore {
   async load(): Promise<CompanionState> {
     try {
       const parsed: unknown = JSON.parse(await readFile(this.filePath, 'utf8'))
-      return normalizeState(parsed)
+      const state = normalizeState(parsed)
+      if ((parsed as { version?: unknown })?.version !== STATE_VERSION) await this.persist(state, false)
+      return state
     } catch (error) {
       if (isNodeError(error) && error.code === 'ENOENT') {
         await this.persist(emptyState(), true)
@@ -61,6 +63,7 @@ export class MemoryCompanionStateStore implements CompanionStateStore {
 }
 
 export function normalizeState(value: unknown): CompanionState {
+  value = migrateTaskScopedState(value)
   const record = object(value, 'state')
   fields(record, ['version', 'authorityEpoch', 'pairings', 'devices', 'services', 'leases', 'tombstones', 'operations', 'instances'])
   if (record.version !== STATE_VERSION) throw new Error('unsupported Companion state version')
@@ -70,12 +73,12 @@ export function normalizeState(value: unknown): CompanionState {
     devices: { id: text, installationIdHash: hash, tokenHash: hash, name: text, platform: oneOf('macos'), osVersion: text, architecture: text, companionVersion: text,
       capabilities: value => { const r = object(value, 'capabilities'); fields(r, ['protocolVersion', 'localForward', 'tcpProbe']); if (r.protocolVersion !== 1 || r.localForward !== true || typeof r.tcpProbe !== 'boolean') invalid() },
       createdAt: date, updatedAt: date, lastSeenAt: optional(date), revokedAt: optional(date) },
-    services: { id: text, taskId: text, name: text, port, protocol, source: oneOf('manual', 'agent', 'process'), evidence: optional(longText), createdAt: date, updatedAt: date, archivedAt: optional(date) },
-    leases: { id: text, taskId: text, serviceId: text, deviceId: text, localHost: oneOf('127.0.0.1'), remoteHost: oneOf('127.0.0.1'), localPort: port, remotePort: port,
+    services: { id: text, name: text, port, protocol, source: oneOf('manual', 'agent', 'process'), evidence: optional(longText), createdAt: date, updatedAt: date, archivedAt: optional(date) },
+    leases: { id: text, serviceId: text, deviceId: text, localHost: oneOf('127.0.0.1'), remoteHost: oneOf('127.0.0.1'), localPort: port, remotePort: port,
       desiredState: oneOf('open', 'closed'), generation, createdAt: date, updatedAt: date, expiresAt: date, closedAt: optional(date), closeReason: optional(closeReason) },
     tombstones: { leaseId: text, deviceId: text, generation, reason: oneOf(...closeReasons, 'orphaned'), createdAt: date, updatedAt: date },
     operations: { id: text, leaseId: text, deviceId: text, generation, kind: oneOf('open', 'close'), createdAt: date, acknowledgedAt: optional(date), errorCode: optional(text), errorMessage: optional(longText),
-      attemptCount: optional(value => integer(value, 0, 3)), lastSentAt: optional(date), protocol: optional(protocol) },
+      attemptCount: optional(value => integer(value, 0)), lastSentAt: optional(date), protocol: optional(protocol) },
     instances: { leaseId: text, deviceId: text, generation, state: oneOf('starting', 'running', 'recovering', 'needs_attention', 'closed'), sshChild: oneOf('unknown', 'running', 'exited'),
       listener: oneOf('unknown', 'owned', 'missing', 'conflict'), remoteProbe: oneOf('unknown', 'healthy', 'failed', 'disabled'), processId: optional(value => integer(value, 1)), retryAttempt: optional(value => integer(value, 0)),
       retryAt: optional(date), errorCode: optional(text), errorMessage: optional(longText), observedAt: date },
@@ -99,9 +102,16 @@ export function normalizeState(value: unknown): CompanionState {
   const leases = new Map(state.leases.map(item => [item.id, item]))
   const tokenHashes = new Set<string>()
   for (const device of state.devices) { if (tokenHashes.has(device.tokenHash)) invalid(); tokenHashes.add(device.tokenHash) }
+  const activePorts = new Set<number>()
+  for (const service of state.services) {
+    if (!service.archivedAt) {
+      if (activePorts.has(service.port)) invalid()
+      activePorts.add(service.port)
+    }
+  }
   for (const lease of state.leases) {
     const service = services.get(lease.serviceId)
-    if (!devices.has(lease.deviceId) || !service || service.taskId !== lease.taskId || service.port !== lease.localPort || lease.localPort !== lease.remotePort) invalid()
+    if (!devices.has(lease.deviceId) || !service || service.port !== lease.localPort || lease.localPort !== lease.remotePort) invalid()
     if (Date.parse(lease.expiresAt) <= Date.parse(lease.createdAt)) invalid()
     if (lease.desiredState === 'closed' && (!lease.closedAt || !lease.closeReason || !state.tombstones.some(item => item.leaseId === lease.id && item.deviceId === lease.deviceId && item.generation === lease.generation))) invalid()
     if (lease.desiredState === 'open' && lease.generation > 1 && !state.operations.some(item => item.leaseId === lease.id && item.deviceId === lease.deviceId && item.kind === 'close' && item.generation === lease.generation - 1)) invalid()
@@ -124,6 +134,44 @@ export function normalizeState(value: unknown): CompanionState {
     if (!lease || lease.deviceId !== instance.deviceId || instance.generation > lease.generation) invalid()
   }
   return state
+}
+
+/** Collapse the v1 per-Task declarations into one Host-global declaration per port. */
+function migrateTaskScopedState(value: unknown): unknown {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || (value as { version?: unknown }).version !== 1) return value
+  const legacy = structuredClone(value) as Record<string, unknown>
+  if (!Array.isArray(legacy.services) || !Array.isArray(legacy.leases)) invalid()
+  const groups = new Map<number, Record<string, unknown>[]>()
+  for (const candidate of legacy.services) {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) invalid()
+    const row = candidate as Record<string, unknown>
+    if (!Number.isSafeInteger(row.port)) invalid()
+    const group = groups.get(row.port as number) ?? []
+    group.push(row)
+    groups.set(row.port as number, group)
+  }
+  const serviceIds = new Map<string, string>()
+  const services: Record<string, unknown>[] = []
+  for (const rows of groups.values()) {
+    const active = rows.filter(row => row.archivedAt === undefined)
+    const candidates = active.length ? active : rows
+    const canonical = candidates.reduce((latest, row) => String(row.updatedAt) >= String(latest.updatedAt) ? row : latest)
+    const migrated = { ...canonical }
+    delete migrated.taskId
+    migrated.createdAt = rows.map(row => String(row.createdAt)).sort()[0]
+    migrated.updatedAt = rows.map(row => String(row.updatedAt)).sort().at(-1)
+    if (active.length) delete migrated.archivedAt
+    services.push(migrated)
+    for (const row of rows) serviceIds.set(String(row.id), String(canonical.id))
+  }
+  const leases = legacy.leases.map(candidate => {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) invalid()
+    const migrated = { ...(candidate as Record<string, unknown>) }
+    delete migrated.taskId
+    migrated.serviceId = serviceIds.get(String(migrated.serviceId)) ?? migrated.serviceId
+    return migrated
+  })
+  return { ...legacy, version: STATE_VERSION, services, leases }
 }
 
 function invalid(): never { throw new Error('invalid Companion state document') }

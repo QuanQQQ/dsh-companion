@@ -16,9 +16,8 @@ export interface DeviceDto {
   online: boolean
 }
 
-export interface TaskServiceDto {
+export interface ServiceDto {
   id: string
-  taskId: string
   name: string
   port: number
   protocol: Protocol
@@ -30,7 +29,6 @@ export interface TaskServiceDto {
 
 export interface ForwardLeaseDto {
   id: string
-  taskId: string
   serviceId: string
   deviceId: string
   localHost: '127.0.0.1'
@@ -62,42 +60,16 @@ export interface InstanceDto {
   observedAt: string
 }
 
-export interface TaskSnapshotDto {
-  taskId: string
-  services: TaskServiceDto[]
+export interface CompanionSnapshotDto {
+  services: ServiceDto[]
   leases: ForwardLeaseDto[]
   instances: InstanceDto[]
   devices: DeviceDto[]
 }
 
-export interface TaskSummaryDto {
-  id: string
-  title: string
-  objective: string
-  status: string
-  workspacePath: string
-}
-
-export async function listTasks(signal?: AbortSignal): Promise<TaskSummaryDto[]> {
-  const payload = await requestJson('/api/task-workspace/tasks', signal ? { signal } : {})
-  const record = asRecord(payload)
-  const tasks = record.tasks ?? record.data
-  if (!Array.isArray(tasks)) throw new Error('Task Workspace 返回内容无效')
-  return tasks.map(value => {
-    const task = asRecord(value)
-    return {
-      id: String(task.id ?? ''),
-      title: String(task.title ?? task.id ?? ''),
-      objective: String(task.objective ?? ''),
-      status: String(task.status ?? ''),
-      workspacePath: String(task.workspacePath ?? task.workspace_path ?? ''),
-    }
-  })
-}
-
-export async function getTaskSnapshot(taskId: string, signal?: AbortSignal): Promise<TaskSnapshotDto> {
-  const payload = asRecord(await requestJson(`/api/companion/tasks/${encodeURIComponent(taskId)}`, signal ? { signal } : {}))
-  return payload.snapshot as TaskSnapshotDto
+export async function getSnapshot(signal?: AbortSignal): Promise<CompanionSnapshotDto> {
+  const payload = asRecord(await requestJson('/api/companion/snapshot', signal ? { signal } : {}))
+  return payload.snapshot as CompanionSnapshotDto
 }
 
 export interface EnrollmentDto {
@@ -132,42 +104,23 @@ export async function revokeDevice(deviceId: string): Promise<void> {
   await requestJson(`/api/companion/devices/${encodeURIComponent(deviceId)}/revoke`, jsonPost({}))
 }
 
-export async function registerService(
-  taskId: string,
-  input: { name: string; port: number; protocol: Protocol },
-): Promise<void> {
-  await requestJson(`/api/companion/tasks/${encodeURIComponent(taskId)}/services`, jsonPost(input))
+export async function registerService(input: { name: string; port: number; protocol: Protocol }): Promise<void> {
+  await requestJson('/api/companion/services', jsonPost(input))
 }
 
-export async function unregisterService(taskId: string, serviceId: string): Promise<void> {
-  await requestJson(`/api/companion/tasks/${encodeURIComponent(taskId)}/services/${encodeURIComponent(serviceId)}/unregister`, jsonPost({}))
+export async function unregisterService(serviceId: string): Promise<void> {
+  await requestJson(`/api/companion/services/${encodeURIComponent(serviceId)}/unregister`, jsonPost({}))
 }
 
-export async function openLease(taskId: string, serviceId: string, deviceId: string, ttlMinutes: number): Promise<void> {
+export async function openLease(serviceId: string, deviceId: string, ttlMinutes: number): Promise<void> {
   await requestJson(
-    `/api/companion/tasks/${encodeURIComponent(taskId)}/services/${encodeURIComponent(serviceId)}/leases`,
+    `/api/companion/services/${encodeURIComponent(serviceId)}/leases`,
     jsonPost({ deviceId, ttlMs: ttlMinutes * 60_000 }),
   )
 }
 
 export async function leaseAction(leaseId: string, action: 'close' | 'restart' | 'recheck'): Promise<void> {
   await requestJson(`/api/companion/leases/${encodeURIComponent(leaseId)}/${action}`, jsonPost({}))
-}
-
-export function matchTask(tasks: readonly TaskSummaryDto[], cwd: string | undefined): TaskSummaryDto | undefined {
-  const current = normalizePath(cwd)
-  if (!current) return undefined
-  return [...tasks]
-    .filter(task => {
-      const workspace = normalizePath(task.workspacePath)
-      return workspace !== '' && (current === workspace || current.startsWith(`${workspace}/`))
-    })
-    .sort((left, right) => normalizePath(right.workspacePath).length - normalizePath(left.workspacePath).length)[0]
-}
-
-function normalizePath(value: string | undefined): string {
-  const normalized = (value ?? '').replace(/\\/g, '/').replace(/\/+$/, '')
-  return normalized || (value?.startsWith('/') ? '/' : '')
 }
 
 function jsonPost(body: unknown): RequestInit {

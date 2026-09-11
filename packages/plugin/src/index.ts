@@ -13,7 +13,6 @@ import { CompanionEnrollmentService } from './enrollment.js'
 import { createCompanionHttpRoute, type CompanionHttpRoute, type CompanionRequestAuthenticator } from './http-route.js'
 import { CompanionService } from './service.js'
 import { JsonCompanionStateStore } from './store.js'
-import { createTaskWorkspaceResolver } from './task-resolver.js'
 import { assertTrustedAuthority } from './trust.js'
 
 export const name = 'dsh-companion'
@@ -45,17 +44,13 @@ export async function apply(ctx: HostContext): Promise<void> {
   const stateStore = new JsonCompanionStateStore(join(dshHome, 'companion', 'state.json'))
   const service = await CompanionService.create(stateStore)
   const enrollment = new CompanionEnrollmentService(service)
-  const resolver = createTaskWorkspaceResolver(ctx.webServer.port)
-  const hub = new CompanionDeviceHub(service, trustedHosts, undefined, async () => {
-    const tasks = await resolver.list()
-    await service.reconcileActiveTasks(new Set(tasks.filter(task => task.status !== 'archived').map(task => task.id)))
-  })
+  const hub = new CompanionDeviceHub(service, trustedHosts, undefined, () => service.expireLeases().then(() => undefined))
 
   ctx.systemPrompt.section(COMPANION_GUIDANCE_SECTION)
-  for (const tool of createCompanionTools(service, resolver)) ctx.tools.register(tool)
+  for (const tool of createCompanionTools(service)) ctx.tools.register(tool)
 
   ctx.effect(
-    () => ctx.webServer.register(createCompanionHttpRoute(service, trustedHosts, undefined, resolver, undefined, ctx.connection, enrollment)),
+    () => ctx.webServer.register(createCompanionHttpRoute(service, trustedHosts, undefined, undefined, undefined, ctx.connection, enrollment)),
     'dsh-companion: Host JSON API',
   )
   ctx.effect(
@@ -66,9 +61,6 @@ export async function apply(ctx: HostContext): Promise<void> {
   const reconcile = async (): Promise<void> => {
     try {
       await service.expireLeases()
-      const tasks = await resolver.list()
-      const activeTaskIds = new Set(tasks.filter(task => task.status !== 'archived').map(task => task.id))
-      await service.reconcileActiveTasks(activeTaskIds)
     } catch (error) {
       console.error('dsh-companion: periodic reconciliation failed', error)
     }
@@ -91,5 +83,4 @@ export * from './http-route.js'
 export * from './protocol.js'
 export * from './service.js'
 export * from './store.js'
-export * from './task-resolver.js'
 export * from './trust.js'
