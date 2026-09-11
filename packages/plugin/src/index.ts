@@ -13,7 +13,7 @@ import { CompanionEnrollmentService } from './enrollment.js'
 import { createCompanionHttpRoute, type CompanionHttpRoute, type CompanionRequestAuthenticator } from './http-route.js'
 import { CompanionService } from './service.js'
 import { JsonCompanionStateStore } from './store.js'
-import { assertTrustedAuthority } from './trust.js'
+import { assertTrustedAuthority, isTrustedCompanionRequest } from './trust.js'
 
 export const name = 'dsh-companion'
 export const inject = ['webServer', 'webRuntime', 'systemPrompt', 'tools', 'connection']
@@ -42,7 +42,26 @@ export async function apply(ctx: HostContext): Promise<void> {
 
   const dshHome = process.env.DSH_HOME ?? join(homedir(), '.dsh')
   const stateStore = new JsonCompanionStateStore(join(dshHome, 'companion', 'state.json'))
-  const service = await CompanionService.create(stateStore)
+  let service: CompanionService
+  try {
+    service = await CompanionService.create(stateStore)
+  } catch (error) {
+    console.error('dsh-companion: initialization failed; Companion is unavailable, Host remains running', error)
+    ctx.effect(() => ctx.webServer.register({
+      kind: 'prefix', path: '/api/companion',
+      async handler(req, res) {
+        const rejection = !isTrustedCompanionRequest(req, trustedHosts) ? 403
+          : typeof ctx.connection?.requestRejection !== 'function' ? 503 : ctx.connection.requestRejection(req)
+        const status = rejection ?? 503
+        res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+        res.end(JSON.stringify({ ok: false, error: {
+          code: status === 401 ? 'UNAUTHORIZED' : status === 403 ? 'FORBIDDEN' : 'COMPANION_UNAVAILABLE',
+          message: status === 503 ? 'Companion initialization failed. State was preserved; check Host logs.' : 'Access denied',
+        } }))
+      },
+    }), 'dsh-companion: unavailable API')
+    return
+  }
   const enrollment = new CompanionEnrollmentService(service)
   const hub = new CompanionDeviceHub(service, trustedHosts, undefined, () => service.expireLeases().then(() => undefined))
 

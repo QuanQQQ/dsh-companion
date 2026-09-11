@@ -40,14 +40,14 @@ test('v1 Task-scoped state migrates durably to one global declaration per port',
   await writeFile(file, JSON.stringify(legacy))
 
   const migrated = await new JsonCompanionStateStore(file).load()
-  assert.equal(migrated.version, 2)
+  assert.equal(migrated.version, 3)
   assert.equal(migrated.services.length, 1)
   assert.equal(migrated.services[0]?.id, 'svc-task-b')
   assert.equal(migrated.services[0]?.name, 'Latest global name')
   assert.equal(migrated.leases[0]?.serviceId, 'svc-task-b')
   assert.equal('taskId' in migrated.services[0]!, false)
   assert.equal('taskId' in migrated.leases[0]!, false)
-  assert.equal(JSON.parse(await readFile(file, 'utf8')).version, 2)
+  assert.equal(JSON.parse(await readFile(file, 'utf8')).version, 3)
 })
 
 test('same Home restart preserves Device and token; different Home never adopts them', async t => {
@@ -64,4 +64,44 @@ test('same Home restart preserves Device and token; different Home never adopts 
   assert.notEqual(isolated.snapshot().authorityEpoch,pair.authorityEpoch)
   assert.throws(()=>isolated.authenticateDevice(pair.token))
   assert.ok(!(await readFile(file,'utf8')).includes(pair.token))
+})
+
+test('both released v2 schemas preserve identity, ownership and exact migration backups', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'companion-v2-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const service = await CompanionService.create(new MemoryCompanionStateStore())
+  const ticket = await service.createPairingTicket()
+  const paired = await service.pairDevice({code:ticket.code,installationId:'v2-test',name:'Mac',osVersion:'15',architecture:'arm64',companionVersion:'0.1.12',capabilities:{protocolVersion:1,localForward:true,tcpProbe:true}})
+  const registered = await service.registerService({name:'Dev',port:5173,protocol:'http',source:'manual'})
+  await service.openLease({serviceId:registered.id,deviceId:paired.device.id})
+  for (const scoped of [true, false]) {
+    const state = service.snapshot()
+    const owner = {provider:'dev-services',namespace:'test',id:'server'}
+    const raw = JSON.stringify({...state,version:2,services:state.services.map(row=>scoped?{...row,taskId:'task-a',managedOwner:owner}:row),leases:state.leases.map(row=>scoped?{...row,taskId:'task-a'}:row)})
+    const file = join(root,`${scoped}.json`)
+    await writeFile(file,raw)
+    const migrated = await new JsonCompanionStateStore(file).load()
+    assert.equal(migrated.version,3)
+    assert.equal(migrated.authorityEpoch,state.authorityEpoch)
+    assert.deepEqual(migrated.devices,state.devices)
+    assert.deepEqual(migrated.leases,state.leases)
+    if(scoped) assert.deepEqual(migrated.services[0]?.managedOwner,owner)
+    const {createHash} = await import('node:crypto')
+    assert.equal(await readFile(file+'.pre-v3.'+createHash('sha256').update(raw).digest('hex')+'.bak','utf8'),raw)
+    assert.equal((await CompanionService.create(new JsonCompanionStateStore(file))).authenticateDevice(paired.token).id,paired.device.id)
+    assert.deepEqual(await new JsonCompanionStateStore(file).load(),migrated)
+  }
+})
+
+test('unsupported state and invalid saves never overwrite persisted data', async t => {
+  const root=await mkdtemp(join(tmpdir(),'companion-invalid-'))
+  t.after(()=>rm(root,{recursive:true,force:true}))
+  const file=join(root,'state.json'), store=new JsonCompanionStateStore(file)
+  const state=await store.load(), raw=await readFile(file,'utf8')
+  await assert.rejects(store.save({...state,version:999} as unknown as typeof state))
+  assert.equal(await readFile(file,'utf8'),raw)
+  const unknown=JSON.stringify({...state,version:999})
+  await writeFile(file,unknown)
+  await assert.rejects(store.load())
+  assert.equal(await readFile(file,'utf8'),unknown)
 })

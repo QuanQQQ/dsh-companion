@@ -1,4 +1,4 @@
-export const STATE_VERSION = 2 as const
+export const STATE_VERSION = 3 as const
 export const LOOPBACK_HOST = '127.0.0.1' as const
 export const MIN_LEASE_TTL_MS = 60 * 1_000
 export const MAX_LEASE_TTL_MS = 7 * 24 * 60 * 60 * 1_000
@@ -47,6 +47,8 @@ export interface PairingTicket {
 }
 
 export interface RegisteredService {
+  /** Preserved ownership metadata from task-scoped managed services. */
+  managedOwner?: { provider: string; namespace: string; id: string } | undefined
   id: string
   name: string
   port: number

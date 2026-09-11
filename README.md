@@ -59,7 +59,7 @@ Device 被拒绝认证时关闭自有 SSH，持久显示 needs_pairing，而非�
 
 AI 工具仍保留 `task_service_register`、`task_service_unregister`、`task_forward_open`、`task_forward_close`、`task_forward_list`、`task_forward_restart` 名称以兼容既有 Agent，但 `task_` 前缀不再表示 Task scope。工具不解析 Agent cwd，也不接受任意 SSH 命令、远端地址或参数。
 
-当前 Host 使用 state schema v2。首次读取 v1 状态时，会按端口把 Task 声明折叠为全局声明，保留最新活跃声明的名称和协议，并把既有 Lease 关联到该声明；迁移结果会原子写回。管理入口为 `GET /api/companion/snapshot`、`POST /api/companion/services` 以及 `/api/companion/services/:serviceId/...`。`/tasks/:taskId/...` 路径仅供缓存客户端兼容，其中 `taskId` 不参与权限或数据筛选。
+Host 使用独立的 state schema v3，支持读取 v1 Task 状态、含 managedOwner 的 v2 Task 状态及 v2 全局状态。Task 声明按端口折叠为全局声明，保留最新活跃声明的名称、协议和托管来源信息，并关联既有 Lease。迁移前保存带原文件 SHA-256 的 .pre-v3 备份，校验通过后原子写回；设备身份与凭据保留。未知版本和非法状态不会被重置。Companion 初始化失败时，仅该插件停止提供转发能力，其 API 返回认证保护下的 503，Host 继续运行；修复状态后重启加载。管理入口为 `GET /api/companion/snapshot`、`POST /api/companion/services` 以及 `/api/companion/services/:serviceId/...`。`/tasks/:taskId/...` 路径仅供缓存客户端兼容，其中 `taskId` 不参与权限或数据筛选。
 
 ### 停止转发与注销服务
 

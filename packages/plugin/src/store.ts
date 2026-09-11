@@ -1,5 +1,5 @@
-import { link, mkdir, open, readFile, rename, rm } from 'node:fs/promises'
-import { randomUUID } from 'node:crypto'
+import { link, mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { createHash, randomUUID } from 'node:crypto'
 import { dirname } from 'node:path'
 import { emptyState, STATE_VERSION, type CompanionState } from './domain.js'
 
@@ -13,9 +13,15 @@ export class JsonCompanionStateStore implements CompanionStateStore {
 
   async load(): Promise<CompanionState> {
     try {
-      const parsed: unknown = JSON.parse(await readFile(this.filePath, 'utf8'))
+      const raw = await readFile(this.filePath, 'utf8')
+      const parsed: unknown = JSON.parse(raw)
       const state = normalizeState(parsed)
-      if ((parsed as { version?: unknown })?.version !== STATE_VERSION) await this.persist(state, false)
+      if ((parsed as { version?: unknown })?.version !== STATE_VERSION) {
+        const backup = this.filePath + '.pre-v3.' + createHash('sha256').update(raw).digest('hex') + '.bak'
+        try { await writeFile(backup, raw, { mode: 0o600, flag: 'wx' }) }
+        catch (error) { if (!isNodeError(error) || error.code !== 'EEXIST') throw error }
+        await this.persist(state, false)
+      }
       return state
     } catch (error) {
       if (isNodeError(error) && error.code === 'ENOENT') {
@@ -26,7 +32,7 @@ export class JsonCompanionStateStore implements CompanionStateStore {
     }
   }
 
-  async save(state: CompanionState): Promise<void> { await this.persist(state, false) }
+  async save(state: CompanionState): Promise<void> { await this.persist(normalizeState(state), false) }
 
   private async persist(state: CompanionState, initialize: boolean): Promise<void> {
     await mkdir(dirname(this.filePath), { recursive: true, mode: 0o700 })
@@ -73,7 +79,7 @@ export function normalizeState(value: unknown): CompanionState {
     devices: { id: text, installationIdHash: hash, tokenHash: hash, name: text, platform: oneOf('macos'), osVersion: text, architecture: text, companionVersion: text,
       capabilities: value => { const r = object(value, 'capabilities'); fields(r, ['protocolVersion', 'localForward', 'tcpProbe']); if (r.protocolVersion !== 1 || r.localForward !== true || typeof r.tcpProbe !== 'boolean') invalid() },
       createdAt: date, updatedAt: date, lastSeenAt: optional(date), revokedAt: optional(date) },
-    services: { id: text, name: text, port, protocol, source: oneOf('manual', 'agent', 'process'), evidence: optional(longText), createdAt: date, updatedAt: date, archivedAt: optional(date) },
+    services: { managedOwner: optional(value => { const owner = object(value, 'managedOwner'); fields(owner, ['provider', 'namespace', 'id']); text(owner.provider); text(owner.namespace); text(owner.id) }), id: text, name: text, port, protocol, source: oneOf('manual', 'agent', 'process'), evidence: optional(longText), createdAt: date, updatedAt: date, archivedAt: optional(date) },
     leases: { id: text, serviceId: text, deviceId: text, localHost: oneOf('127.0.0.1'), remoteHost: oneOf('127.0.0.1'), localPort: port, remotePort: port,
       desiredState: oneOf('open', 'closed'), generation, createdAt: date, updatedAt: date, expiresAt: date, closedAt: optional(date), closeReason: optional(closeReason) },
     tombstones: { leaseId: text, deviceId: text, generation, reason: oneOf(...closeReasons, 'orphaned'), createdAt: date, updatedAt: date },
@@ -136,11 +142,17 @@ export function normalizeState(value: unknown): CompanionState {
   return state
 }
 
-/** Collapse the v1 per-Task declarations into one Host-global declaration per port. */
+/** Migrate both task-scoped schemas and the earlier global v2 schema to v3. */
 function migrateTaskScopedState(value: unknown): unknown {
-  if (!value || typeof value !== 'object' || Array.isArray(value) || (value as { version?: unknown }).version !== 1) return value
+  if (!value || typeof value !== 'object' || Array.isArray(value) || ![1, 2].includes((value as { version: number }).version)) return value
   const legacy = structuredClone(value) as Record<string, unknown>
   if (!Array.isArray(legacy.services) || !Array.isArray(legacy.leases)) invalid()
+  const taskScoped = legacy.version === 1 || [...legacy.services, ...legacy.leases].some(row => row && typeof row === 'object' && 'taskId' in row)
+  if (!taskScoped) return { ...legacy, version: STATE_VERSION }
+  for (const row of [...legacy.services, ...legacy.leases]) {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) invalid()
+    text((row as Record<string, unknown>).taskId)
+  }
   const groups = new Map<number, Record<string, unknown>[]>()
   for (const candidate of legacy.services) {
     if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) invalid()
