@@ -215,4 +215,10 @@ Host 0.1.13 将 Service 与 Lease 改为 Host 全局状态，移除 Task Workspa
 
 CLI 0.1.10 对 SSH_EXITED、启动/命令超时、LINK_LOST 和 LISTENER_MISSING 持续退避重试，最长间隔 30 秒，成功后连续失败计数归零。Host 持续重发未确认的幂等 operation，并把新 Connection Session 的 recovering/starting 视为需要 fresh fenced Open；旧 CLI 上报 RETRY_EXHAUSTED 时也能由 Host 自动重新启用。认证、Host Key、端口冲突、策略、撤销和到期仍不自动绕过。
 
-本地 `pnpm -r check` 通过：Plugin 92 项、CLI 164 项，类型检查和两包构建成功；插件 PDM check 也通过 92 项，分发 bundle `--version` 为 0.1.10。`dsh-companion-lifecycle-test`（http://127.0.0.1:3083/）以既有 v1 Home 启动并迁移，浏览器无 console error；在一个 Session 注册 `Global smoke service:55201` 后，另一个 Session 的 Local Services 立即看到同一声明，随后注销并重启 Host，迁移后的全局空列表与历史关闭记录仍可加载。没有在该隔离 Home 配对真实 Mac，因此真实断网、睡眠唤醒和 Apple SSH 行为仍须按 macOS 验收清单执行。本轮未提交、未发布、未排队或修改 Stable。
+本地 `pnpm -r check` 通过：Plugin 92 项、CLI 164 项，类型检查和两包构建成功；插件 PDM check 也通过 92 项，分发 bundle `--version` 为 0.1.10。`dsh-companion-lifecycle-test`（http://127.0.0.1:3083/）以既有 v1 Home 启动并迁移，浏览器无 console error；在一个 Session 注册 `Global smoke service:55201` 后，另一个 Session 的 Local Services 立即看到同一声明，随后注销并重启 Host，迁移后的全局空列表与历史关闭记录仍可加载。没有在该隔离 Home 配对真实 Mac，因此真实断网、睡眠唤醒和 Apple SSH 行为仍须按 macOS 验收清单执行。本开发验收阶段未提交、未发布、未排队或修改 Stable。
+
+## 2026-09-11：Host 0.1.13 发布与 Stable 排队
+
+发布提交 `18db338792e087994871cf613c9290c77c3152a3` 已推送至远端 main。首次使用多插件联调项目 `dsh-companion-lifecycle-test` 发布时，干净安装因未授权的传递依赖 lifecycle script `node-pty@1.1.0` 被 PDM 拒绝；该尝试没有生成 Pending 更新。没有为无关依赖扩大 allowBuilds，而是使用既有单插件发布项目 `dsh-companion-package-validation` 重新执行检查、归档、构建、干净 DSH_HOME 安装及启动验证。
+
+PDM 生成并晋级制品 `dsh-companion-0.1.13-dfc9573f64f6.tgz`，SHA-256 为 `dfc9573f64f6875f99186758fb0b5b69b89595f47abca04927e1e5207871ffcd`，allowBuilds 为空。该精确制品已进入 Stable 安全更新队列，状态为 `waiting-for-idle`；实际安装和 Host 重启由 idle gate/quiet window 决定，本记录不把排队描述为已上线。
