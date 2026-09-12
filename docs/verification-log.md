@@ -230,3 +230,9 @@ PDM 生成并晋级制品 `dsh-companion-0.1.13-dfc9573f64f6.tgz`，SHA-256 为 
 CLI 0.1.11 对控制器本地故障先同步失效连接并等待自有 SSH 清理，再按有界退避持续重连；SSH 清理失败仍转为终态 `CLEANUP_FAILED`，不会带着未确认的 listener 重连。新 daemon 在 `controller.initialize()` 完成 SSH 所有权恢复后，解除旧版遗留的 `LOCAL_ERROR` 阻断；认证、Authority、TLS、协议、凭证及状态写入阻断保持终态。Device Settings 把模糊的“在线/离线”改为“控制通道在线/Companion 未连接”，并明确浏览器在线不代表 Companion 已连接。
 
 本地 `pnpm -r check` 通过：Plugin 95 项、CLI 168 项，类型检查和两包构建成功；PDM 项目 `dsh-companion-lifecycle-test` 的 Plugin check 通过。隔离 Web `http://127.0.0.1:3083/` 实测新状态说明和时间标签加载正常，console 无错误；最终构建的分发 bundle 为 CLI 0.1.11，SHA-256 为 `d48bd2c0640441622cb10398bbe449821bd0060306f85c24e5fdb8bf6301af68`。用户重跑 Stable 统一启动命令后，真实 Mac 已从 CLI 0.1.9 更新到 0.1.10，Host 确认 Device 在线且两条现有 Forward Instance 保持 running。CLI 0.1.11 尚未安装到真实 Mac，因此真实故障恢复仍保留为未完成的 macOS 发布验收；本阶段未提交、未发布、未排队或修改 Stable 插件。
+
+## 2026-09-12：Host 0.1.15 / CLI 0.1.11 发布与 Stable 排队
+
+发布提交 `50a9b23acd236417ebcb9af72a6fb71d03ac6428` 已推送至远端 main。PDM 单插件项目 `dsh-companion-package-validation` 对该发布提交执行检查、归档重建、干净 DSH_HOME 安装和启动验证后，生成并晋级制品 `dsh-companion-0.1.15-940c59e36a3e.tgz`，SHA-256 为 `940c59e36a3e5d848f7d098f9fddbff9a9eb073e97172c0e37a229215235252a`，allowBuilds 为空。
+
+该精确制品已进入 Stable 安全更新队列，状态为 `waiting-for-idle`，入队时间为 `2026-09-12T06:34:54.644Z`。实际安装和 Host 重启继续由 idle gate/quiet window 决定；排队成功不表示 Stable 已安装 0.1.15，也不表示真实 Mac 已运行 CLI 0.1.11。
