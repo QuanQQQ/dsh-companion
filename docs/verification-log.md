@@ -222,3 +222,11 @@ CLI 0.1.10 对 SSH_EXITED、启动/命令超时、LINK_LOST 和 LISTENER_MISSING
 发布提交 `18db338792e087994871cf613c9290c77c3152a3` 已推送至远端 main。首次使用多插件联调项目 `dsh-companion-lifecycle-test` 发布时，干净安装因未授权的传递依赖 lifecycle script `node-pty@1.1.0` 被 PDM 拒绝；该尝试没有生成 Pending 更新。没有为无关依赖扩大 allowBuilds，而是使用既有单插件发布项目 `dsh-companion-package-validation` 重新执行检查、归档、构建、干净 DSH_HOME 安装及启动验证。
 
 PDM 生成并晋级制品 `dsh-companion-0.1.13-dfc9573f64f6.tgz`，SHA-256 为 `dfc9573f64f6875f99186758fb0b5b69b89595f47abca04927e1e5207871ffcd`，allowBuilds 为空。该精确制品已进入 Stable 安全更新队列，状态为 `waiting-for-idle`；实际安装和 Host 重启由 idle gate/quiet window 决定，本记录不把排队描述为已上线。
+
+## 2026-09-12：Host 0.1.15 / CLI 0.1.11 开发——本地故障后持续恢复
+
+用户在 Mac 浏览器仍直连 Stable Web 时看到 Device 离线。Host 同时存在来自 Mac 网段的 3080 浏览器连接，但 Device API 的最近控制通道活动停在 03:40:34。保留现场后，Mac 本地 status 显示 LaunchAgent 已加载、daemon 观察为 `needs_attention`、`lastDisconnectReason=LOCAL_ERROR`、`automaticRetryBlocked=true`，运行版本为 CLI 0.1.9。该证据确认“整机/浏览器在线”和“Companion 控制通道在线”是两种独立状态，并定位到旧 CLI 把控制器本地故障永久阻断的恢复缺口。
+
+CLI 0.1.11 对控制器本地故障先同步失效连接并等待自有 SSH 清理，再按有界退避持续重连；SSH 清理失败仍转为终态 `CLEANUP_FAILED`，不会带着未确认的 listener 重连。新 daemon 在 `controller.initialize()` 完成 SSH 所有权恢复后，解除旧版遗留的 `LOCAL_ERROR` 阻断；认证、Authority、TLS、协议、凭证及状态写入阻断保持终态。Device Settings 把模糊的“在线/离线”改为“控制通道在线/Companion 未连接”，并明确浏览器在线不代表 Companion 已连接。
+
+本地 `pnpm -r check` 通过：Plugin 95 项、CLI 168 项，类型检查和两包构建成功；PDM 项目 `dsh-companion-lifecycle-test` 的 Plugin check 通过。隔离 Web `http://127.0.0.1:3083/` 实测新状态说明和时间标签加载正常，console 无错误；最终构建的分发 bundle 为 CLI 0.1.11，SHA-256 为 `d48bd2c0640441622cb10398bbe449821bd0060306f85c24e5fdb8bf6301af68`。用户重跑 Stable 统一启动命令后，真实 Mac 已从 CLI 0.1.9 更新到 0.1.10，Host 确认 Device 在线且两条现有 Forward Instance 保持 running。CLI 0.1.11 尚未安装到真实 Mac，因此真实故障恢复仍保留为未完成的 macOS 发布验收；本阶段未提交、未发布、未排队或修改 Stable 插件。

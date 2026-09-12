@@ -36,7 +36,11 @@ export async function readConnectionState(path: string, deviceId: string): Promi
     if (value.pairingRequired !== undefined && typeof value.pairingRequired !== 'boolean') throw new Error('Invalid pairing state')
     if (value.automaticRetryBlocked !== undefined && typeof value.automaticRetryBlocked !== 'boolean') throw new Error('Invalid retry policy state')
     // Legacy exhausted counters are diagnostics, not a permanent network-recovery lockout.
-    return { ...connectionDetails(value), attempts: value.reconnectAttempts as number, pairingRequired: value.pairingRequired === true || value.state === 'needs_pairing', automaticRetryBlocked: value.automaticRetryBlocked === true }
+    // Older CLIs persisted every LOCAL_ERROR as terminal. A fresh daemon first revalidates
+    // and closes owned SSH state in controller.initialize(), so that legacy block is safe to retry.
+    const details = connectionDetails(value)
+    return { ...details, attempts: value.reconnectAttempts as number, pairingRequired: value.pairingRequired === true || value.state === 'needs_pairing',
+      automaticRetryBlocked: value.automaticRetryBlocked === true && details.lastDisconnectReason !== 'LOCAL_ERROR' }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { attempts: 0, pairingRequired: false, automaticRetryBlocked: false }
     throw error

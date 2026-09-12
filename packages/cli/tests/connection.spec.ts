@@ -1,11 +1,16 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import test, { type TestContext } from 'node:test'
 import { EventEmitter } from 'node:events'
 import { setImmediate as turn } from 'node:timers/promises'
 import { createServer } from 'node:http'
 import { once } from 'node:events'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { WebSocket, WebSocketServer } from 'ws'
 import { runControlChannel, reconnectDelay, connectionDetails, type ConnectionClock, type ConnectionOptions } from '../src/connection.js'
+import { readConnectionState } from '../src/daemon.js'
 
 async function flush() { for (let i = 0; i < 20; i++) await Promise.resolve(); await turn() }
 class Clock implements ConnectionClock {
@@ -115,6 +120,72 @@ test('only a full minute of healthy heartbeats resets network backoff', async t 
   }
   assert.equal(f.latest().reconnectAttempts, 0)
   assert.equal(s.sent.map(s=>JSON.parse(s)).filter(s=>s.type==='pong').length, 4)
+})
+
+test('a transient local controller failure closes SSH before reconnecting instead of staying offline', async t => {
+  let failTick = true, disconnects = 0
+  const controller: ConnectionOptions['controller'] = {
+    initialize: async () => {}, connect: () => {}, disconnect: async () => { disconnects++ }, execute: async () => ({ ok: true }),
+    expireNow: async () => {}, tick: async () => { if (failTick) { failTick = false; throw new Error('local transient failure') } },
+  }
+  const f = await fixture(t, { controller })
+  f.sockets[0]!.hello(f.clock.now()); await flush()
+  await f.clock.advance(1000)
+  assert.equal(f.latest().lastDisconnectReason, 'LOCAL_ERROR')
+  assert.equal(f.latest().state, 'reconnecting')
+  assert.equal(f.latest().automaticRetryBlocked, false)
+  assert.equal(disconnects, 1)
+  await f.retry()
+  f.sockets[1]!.hello(f.clock.now()); await flush()
+  assert.equal(f.latest().state, 'connected')
+})
+
+test('a rejected Host operation also fails closed and reconnects with a fresh session', async t => {
+  let disconnects = 0
+  const controller: ConnectionOptions['controller'] = {
+    initialize: async () => {}, connect: () => {}, disconnect: async () => { disconnects++ },
+    execute: async () => { throw new Error('local operation failure') }, expireNow: async () => {}, tick: async () => {},
+  }
+  const f = await fixture(t, { controller })
+  f.sockets[0]!.hello(f.clock.now()); await flush()
+  const semantic = { authorityEpoch: 'epoch', expiresAt: '2026-09-10T01:00:00.000Z', generation: 1, leaseId: 'lease', operationId: 'operation', port: 3210, protocol: 'http', type: 'forward.open', v: 1 }
+  const digest = createHash('sha256').update(JSON.stringify(semantic)).digest('hex')
+  f.sockets[0]!.frame({ ...semantic, sessionEpoch: 'session', digest }); await flush()
+  assert.equal(f.latest().lastDisconnectReason, 'LOCAL_ERROR')
+  assert.equal(f.latest().state, 'reconnecting')
+  assert.equal(f.latest().automaticRetryBlocked, false)
+  assert.equal(disconnects, 1)
+  await f.retry()
+  f.sockets[1]!.hello(f.clock.now()); await flush()
+  assert.equal(f.latest().state, 'connected')
+})
+
+test('a local controller failure still blocks if fail-closed SSH cleanup cannot complete', async t => {
+  let failTick = true
+  const controller: ConnectionOptions['controller'] = {
+    initialize: async () => {}, connect: () => {}, disconnect: async () => { throw new Error('unsafe cleanup') }, execute: async () => ({ ok: true }),
+    expireNow: async () => {}, tick: async () => { if (failTick) { failTick = false; throw new Error('local transient failure') } },
+  }
+  const f = await fixture(t, { controller })
+  f.sockets[0]!.hello(f.clock.now()); await flush()
+  await f.clock.advance(1000)
+  assert.equal(f.latest().lastDisconnectReason, 'CLEANUP_FAILED')
+  assert.equal(f.latest().state, 'cleanup_failed')
+  assert.equal(f.latest().automaticRetryBlocked, true)
+  await f.clock.advance(60000)
+  assert.equal(f.sockets.length, 1)
+})
+
+test('a legacy LOCAL_ERROR block is retried only after fresh-daemon ownership recovery', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'dsh-companion-connection-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const path = join(directory, 'daemon-status.json')
+  const status = { state: 'needs_attention', reconnectAttempts: 0, pairingRequired: false, automaticRetryBlocked: true,
+    deviceId: 'device', lastDisconnectReason: 'LOCAL_ERROR', updatedAt: '2026-09-10T00:00:00.000Z' }
+  await writeFile(path, JSON.stringify(status))
+  assert.equal((await readConnectionState(path, 'device')).automaticRetryBlocked, false)
+  await writeFile(path, JSON.stringify({ ...status, lastDisconnectReason: 'CLEANUP_FAILED' }))
+  assert.equal((await readConnectionState(path, 'device')).automaticRetryBlocked, true)
 })
 
 test('HTTP rejection, revocation, wrong authority, TLS and protocol failures remain terminal', async t => {

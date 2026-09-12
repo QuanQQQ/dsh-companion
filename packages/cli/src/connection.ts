@@ -87,6 +87,7 @@ export async function runControlChannel(options: ConnectionOptions): Promise<voi
   let fence: Fence | undefined
   let queued = 0
   let connecting: Promise<void> | undefined
+  let scheduling = false
   let cleanup = Promise.resolve()
   let statusTail = Promise.resolve()
   let lastDisconnectReason = options.previous.lastDisconnectReason
@@ -141,10 +142,22 @@ export async function runControlChannel(options: ConnectionOptions): Promise<voi
     retryArmed = true
     cancelRetry = clock.after(() => launchReconnect(), Math.max(0, nextReconnectAt! - clock.now()))
   }
+  const requestSchedule = (permanent: boolean) => {
+    if (stopping || scheduling) return
+    scheduling = true
+    void schedule(permanent).catch(() => failClosed('STATUS_WRITE_FAILED')).finally(() => { scheduling = false })
+  }
+  const recoverLocal = () => {
+    if (stopping || pairingRequired || automaticRetryBlocked || scheduling) return
+    if (!socket && (retryArmed || connecting)) return
+    recordDisconnect('LOCAL_ERROR')
+    if (socket) invalidate(socket)
+    requestSchedule(false)
+  }
   const launchReconnect = () => {
     if (!retryArmed || stopping || socket || connecting || pairingRequired || automaticRetryBlocked) return
     clearRetry()
-    void connect().catch(() => failClosed('LOCAL_ERROR'))
+    void connect().catch(recoverLocal)
   }
   const connect = (): Promise<void> => {
     if (connecting) return connecting
@@ -170,7 +183,7 @@ export async function runControlChannel(options: ConnectionOptions): Promise<voi
     const settle = (permanent = false, reason: ConnectionReason = 'NETWORK_ERROR', closeCode?: number, httpStatus?: number) => {
       if (terminal || socket !== ws) return
       terminal = true; recordDisconnect(reason, closeCode, httpStatus); invalidate(ws)
-      void schedule(permanent).catch(() => failClosed('STATUS_WRITE_FAILED'))
+      requestSchedule(permanent)
     }
     ws.on('error', error => { const reason = transportErrorReason(error); settle(reason !== 'NETWORK_ERROR', reason) })
     ws.on('unexpected-response', (_req, res) => {
@@ -210,7 +223,7 @@ export async function runControlChannel(options: ConnectionOptions): Promise<voi
         const captured = { ...fence }
         void controller.execute(frame).then(result => {
           send({ v: 1, type: 'forward.result', ...captured, operationId: frame.operationId, digest: frame.digest, ...result })
-        }).catch(() => settle(true, 'LOCAL_ERROR')).finally(() => { queued -= 1 })
+        }).catch(() => settle(false, 'LOCAL_ERROR')).finally(() => { queued -= 1 })
       } catch { settle(true, 'PROTOCOL_ERROR') }
     })
     lastFrameAt = clock.now()
@@ -225,10 +238,10 @@ export async function runControlChannel(options: ConnectionOptions): Promise<voi
     if (stopping) return
     // On resume, service an overdue retry without waiting another full suspended timeout.
     if (retryArmed && nextReconnectAt !== undefined && clock.now() >= nextReconnectAt) launchReconnect()
-    void controller.expireNow().catch(() => failClosed('LOCAL_ERROR'))
+    void controller.expireNow().catch(recoverLocal)
     if (ticking) return
     ticking = true
-    void controller.tick().catch(() => failClosed('LOCAL_ERROR')).finally(() => { ticking = false })
+    void controller.tick().catch(recoverLocal).finally(() => { ticking = false })
   }, 1000)
   const stop = () => {
     if (stopping) return
@@ -242,12 +255,12 @@ export async function runControlChannel(options: ConnectionOptions): Promise<voi
     clearRetry(); attempts = 0; pairingRequired = false; automaticRetryBlocked = false
     // An explicit retry may reattempt cleanup, but can never bypass its successful completion.
     cleanup = cleanup.catch(() => controller.disconnect())
-    void status('reconnecting').then(connect).catch(() => failClosed('LOCAL_ERROR'))
+    void status('reconnecting').then(connect).catch(recoverLocal)
   }
   signals.on('SIGTERM', stop); signals.on('SIGINT', stop); signals.on('SIGHUP', retry)
   try {
     await controller.initialize()
-    if (!stopping) await connect().catch(() => failClosed('LOCAL_ERROR'))
+    if (!stopping) await connect().catch(recoverLocal)
     await done
     await status('stopped')
   } finally {

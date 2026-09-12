@@ -1,6 +1,6 @@
 {
   "name": "dsh-companion-cli",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "description": "macOS Companion for DSH localhost forwarding",
   "type": "module",
   "bin": { "dsh-companion": "lib/cli.mjs" },

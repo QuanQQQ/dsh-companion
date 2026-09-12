@@ -74,10 +74,11 @@ export function DeviceSettings({ close }: SettingsSectionOwnerProps) {
         <div className="dco-safety">只建立配对，不授予任何转发 Lease。不要批准不认识的请求。</div>
       </article>)}
     </section>
+    <div className="dco-safety">连接状态仅表示 Companion 与 Host 的控制通道；Device 整机或浏览器在线不等于 Companion 已连接。</div>
     <div className="dco-device-list">{loading ? <div className="dco-empty-small">正在读取 Device…</div> : devices.length===0 ? <div className="dco-empty-small">此 Host 尚无配对的 Device。不同测试数据目录不共享配对；请运行统一命令校验或重新授权。</div> : devices.map(device=><article key={device.id} className={'dco-device-card'+(device.revokedAt?' dco-revoked':'')}>
-      <div className="dco-device-title"><strong>{device.name}</strong><span className={'dco-chip '+(device.revokedAt?'dco-chip-muted':device.online?'dco-chip-green':'dco-chip-muted')}>{device.revokedAt?'已撤销':device.online?'在线':'离线'}</span></div>
+      <div className="dco-device-title"><strong>{device.name}</strong><span className={'dco-chip '+(device.revokedAt?'dco-chip-muted':device.online?'dco-chip-green':'dco-chip-muted')}>{device.revokedAt?'已撤销':device.online?'控制通道在线':'Companion 未连接'}</span></div>
       <div className="dco-device-meta">macOS {device.osVersion} · {device.architecture} · CLI {device.companionVersion}</div>
-      <div className="dco-device-meta">上次在线 {device.lastSeenAt ? new Date(device.lastSeenAt).toLocaleString() : '尚未连接'}</div>
+      <div className="dco-device-meta">上次控制通道活动 {device.lastSeenAt ? new Date(device.lastSeenAt).toLocaleString() : '尚未连接'}</div>
       <div className="dco-device-actions"><label><input type="radio" name="companion-preferred" disabled={!!device.revokedAt} checked={preferred===device.id} onChange={()=>choose(device.id)}/>默认使用此 Device</label><button className="dco-button" disabled={!!device.revokedAt} onClick={()=>void revoke(device)}>撤销</button></div>
       <details><summary>诊断信息</summary><dl><dt>Device ID</dt><dd><code>{device.id}</code></dd><dt>Capabilities</dt><dd>Local forward · protocol v{device.capabilities.protocolVersion}</dd></dl></details>
     </article>)}</div>
