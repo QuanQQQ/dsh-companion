@@ -236,3 +236,11 @@ CLI 0.1.11 对控制器本地故障先同步失效连接并等待自有 SSH 清�
 发布提交 `50a9b23acd236417ebcb9af72a6fb71d03ac6428` 已推送至远端 main。PDM 单插件项目 `dsh-companion-package-validation` 对该发布提交执行检查、归档重建、干净 DSH_HOME 安装和启动验证后，生成并晋级制品 `dsh-companion-0.1.15-940c59e36a3e.tgz`，SHA-256 为 `940c59e36a3e5d848f7d098f9fddbff9a9eb073e97172c0e37a229215235252a`，allowBuilds 为空。
 
 该精确制品已进入 Stable 安全更新队列，状态为 `waiting-for-idle`，入队时间为 `2026-09-12T06:34:54.644Z`。实际安装和 Host 重启继续由 idle gate/quiet window 决定；排队成功不表示 Stable 已安装 0.1.15，也不表示真实 Mac 已运行 CLI 0.1.11。
+
+## 2026-09-15：Host 0.1.16 / CLI 0.1.12 开发——区分 SSH 退出与 stdio 关闭
+
+Stable 0.1.15 已于 2026-09-14 15:22:41 +08:00 安装，真实 Mac 也已运行 CLI 0.1.11，但用户再次观察到 Companion 未连接。保留现场后，Device status 显示 `cleanup_failed`、`lastDisconnectReason=CLEANUP_FAILED`、`automaticRetryBlocked=true`，最后控制通道活动为 2026-09-15 12:30:13 +08:00。Host 最后观察到 3120 为 `recovering/SSH_EXITED`，3334 为 running；Mac 现场没有 3120/3334 listener，也没有 Companion SSH 进程，只有 daemon 存活，而 runtime-state 仍保留 3334 的 running/controlPath。
+
+现场与清理代码共同定位到退出证明的层级错误：Node `ChildProcess` 的 `exit` 已证明自有 SSH 主进程及其 listener 消失，但旧实现继续等待可能被后代进程持有的 stdout/stderr 管道触发 `close`；超时后把实际已完成的清理误报为 `CLEANUP_FAILED`。CLI 0.1.12 将退出证明改为主进程 `exit`，`close` 仍负责最终流排空和退出回调；真正没有退出的进程仍执行 TERM→KILL，并在两次有界等待后保持 `SSH_STOP_TIMEOUT/CLEANUP_FAILED`。
+
+新增“主进程已退出但 stdio 延迟 close”和“control socket 消失且保存 PID 不存在时清理孤儿 owner 目录”回归测试，并保留 live/reused PID、无法退出、stopAll 部分失败和元数据篡改阻断测试。本地 `pnpm -r check` 通过：Plugin 95 项、CLI 170 项，类型检查和两包构建成功；PDM 单插件项目 `dsh-companion-package-validation` check 通过。最终开发 bundle 为 CLI 0.1.12，SHA-256 为 `671c853736e35ced8be4b28e900ffb0e1c9512e1e9a4f5871ae000f751e8eeff`。本阶段尚未提交、发布、排队或修改 Stable；真实 Mac 仍保留故障现场，未用未发布代码作生产验收。

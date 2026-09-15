@@ -38,7 +38,7 @@ interface Instance {
   ready: boolean
   stopping: boolean
   stderr: Buffer
-  done: Promise<void>
+  exitDone: Promise<void>
   stopPromise?: Promise<void>
 }
 interface Pending { cancelled: boolean; promise: Promise<{ pid: number; controlPath: string }> }
@@ -231,6 +231,7 @@ export class SshExecutor {
     if (!owner || (owner.version !== undefined && owner.version !== 2) || owner.leaseId !== input.leaseId || owner.sshHost !== this.sshHost || owner.controlPath !== input.controlPath ||
         !Number.isSafeInteger(owner.pid) || owner.pid <= 0 || !validPort(owner.port) ||
         (input.processId !== undefined && owner.pid !== input.processId)) fail('SSH_OWNERSHIP_UNVERIFIED')
+    if (await this.removeExitedOwnerWithoutSocket(owner, directory)) return
     if (!await this.verify(owner, this.settings.commandTimeoutMs, owner.version === 2)) fail('SSH_OWNERSHIP_UNVERIFIED')
     const result = await this.control(owner.controlPath, 'exit', this.settings.commandTimeoutMs)
     if (result.code !== 0) fail('SSH_STOP_FAILED')
@@ -300,17 +301,19 @@ export class SshExecutor {
   }
 
   private track(child: ChildProcess, leaseId: string, port: number, directory: string, controlPath: string): Instance {
-    let finish!: () => void
+    let finishExit!: () => void
     const instance: Instance = { child, leaseId, port, directory, controlPath, pid: child.pid ?? 0,
       exited: false, ready: false, stopping: false, stderr: Buffer.alloc(0),
-      done: new Promise<void>(done => { finish = done }) }
+      exitDone: new Promise<void>(done => { finishExit = done }) }
     child.stdout?.on('data', () => { /* Always drain, never retain tunnel stdout. */ })
     child.stderr?.on('data', chunk => { instance.stderr = append(instance.stderr, chunk, this.settings.stderrLimitBytes) })
-    child.on('error', () => { if (!child.pid) instance.exited = true })
-    child.once('exit', () => { instance.exited = true })
+    child.on('error', () => { if (!child.pid) { instance.exited = true; finishExit() } })
+    // Process exit is the listener-release proof. Descendants may keep inherited stdio
+    // pipes open and delay ChildProcess 'close' after the owned SSH master is already gone.
+    child.once('exit', () => { instance.exited = true; finishExit() })
     child.once('close', () => {
       instance.exited = true
-      finish()
+      finishExit()
       if (instance.ready && !instance.stopping) {
         try { this.onExit?.(leaseId, exitCode(instance.stderr)) } catch { /* Caller owns callback failures. */ }
       }
@@ -323,9 +326,9 @@ export class SshExecutor {
     instance.stopping = true
     instance.stopPromise = (async () => {
       if (!instance.exited && instance.pid > 0) this.signalGroup(instance.child, 'SIGTERM')
-      if (!await waitBounded(instance.done, this.settings.terminateTimeoutMs)) {
+      if (!await waitBounded(instance.exitDone, this.settings.terminateTimeoutMs)) {
         if (!instance.exited && instance.pid > 0) this.signalGroup(instance.child, 'SIGKILL')
-        if (!await waitBounded(instance.done, this.settings.terminateTimeoutMs)) fail('SSH_STOP_TIMEOUT')
+        if (!await waitBounded(instance.exitDone, this.settings.terminateTimeoutMs)) fail('SSH_STOP_TIMEOUT')
       }
       await rm(instance.directory, { recursive: true, force: true })
       if (this.instances.get(instance.leaseId) === instance) this.instances.delete(instance.leaseId)
@@ -333,6 +336,17 @@ export class SshExecutor {
     // Keep unconfirmed children tracked, and permit a later stop retry.
     void instance.stopPromise.catch(() => { delete instance.stopPromise })
     return instance.stopPromise
+  }
+
+  private async removeExitedOwnerWithoutSocket(owner: Owner, directory: string): Promise<boolean> {
+    try { await lstat(owner.controlPath); return false }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+    // ForkAfterAuthentication and ControlPersist are disabled, so a missing master PID
+    // proves this socket-less metadata cannot represent a surviving authorized listener.
+    const ps = await this.command('/bin/ps', ['-p', String(owner.pid), '-o', 'pid='], this.settings.commandTimeoutMs)
+    if (ps.code !== 1 || ps.stdout.trim() || ps.stderr.trim()) return false
+    await rm(directory, { recursive: true, force: true })
+    return true
   }
 
   private async verifyMaster(owner: Pick<Owner, 'pid' | 'controlPath'>, timeout: number): Promise<boolean> {

@@ -261,7 +261,7 @@ test('stop cancels an in-flight start and stopAll blocks racing starts', async t
   await f.executor.start('after', 3080)
 })
 
-test('TERM escalates to KILL and stop waits for close without reporting onExit', async t => {
+test('TERM escalates to KILL and stop waits for process exit without reporting onExit', async t => {
   const f = await fixture(t, { terminateTimeoutMs: 25 })
   f.state.configureChild = child => { child.exitOn = 'SIGKILL'; child.closeDelayMs = 10 }
   const exits: string[] = []
@@ -269,9 +269,21 @@ test('TERM escalates to KILL and stop waits for close without reporting onExit',
   await f.executor.start('lease', 3080)
   const before = Date.now()
   await Promise.all([f.executor.stop('lease'), f.executor.stop('lease')])
-  assert.ok(Date.now() - before >= 30)
+  assert.ok(Date.now() - before >= 25)
   assert.deepEqual(f.children[0]!.signals, ['SIGTERM', 'SIGKILL'])
   assert.deepEqual(exits, [])
+  assert.deepEqual(await readdir(f.root), [])
+})
+
+test('process exit proves cleanup even when inherited stdio delays close', async t => {
+  const f = await fixture(t, { terminateTimeoutMs: 10 })
+  f.state.configureChild = child => { child.closeDelayMs = 100 }
+  await f.executor.start('lease', 3080)
+  const child = f.children[0]!
+  await f.executor.stop('lease')
+  assert.deepEqual(child.signals, ['SIGTERM'])
+  assert.equal(child.exited, true)
+  assert.equal(child.stdout.writableEnded, false)
   assert.deepEqual(await readdir(f.root), [])
 })
 
@@ -511,6 +523,21 @@ test('recoverAll finds owner records without any controller runtime controlPath'
   assert.deepEqual(await readdir(f.root), [])
   assert.equal(await restarted.isOwned('unrecorded-a'), false)
   await restarted.recoverAll()
+})
+
+test('recoverAll removes socketless metadata only after the saved SSH PID is absent', async t => {
+  const f = await fixture(t)
+  const started = await f.executor.start('lease', 3080)
+  const server = f.sockets.get(started.controlPath)!.server
+  const closed = once(server, 'close')
+  f.children[0]!.finish(0)
+  await closed
+  await assert.rejects(lstat(started.controlPath), { code: 'ENOENT' })
+  const restarted = new SshExecutor('work-box', f.root, f.settings)
+  await restarted.recoverAll()
+  assert.ok(f.calls.some(call => call.file === '/bin/ps'))
+  assert.equal(f.calls.filter(call => call.args.includes('exit')).length, 0)
+  assert.deepEqual(await readdir(f.root), [])
 })
 
 test('recoverAll closes a spawned SSH whose start has not returned for runtime persistence', async t => {
