@@ -18,11 +18,11 @@ curl --disable -fsS --proto '=https' https://YOUR_DSH_HOST/api/companion/bootstr
 
 ## 后台断线恢复
 
-CLI 0.1.9 起，普通断网、心跳超时、HTTP 408/429/5xx 持续退避重连，最长间隔 30 秒；睡眠唤醒后处理已过期的重连计时。CLI 0.1.10 起，SSH 退出、启动/命令超时、链路或 listener 丢失等 Forward Instance 瞬态故障也持续退避重试。CLI 0.1.11 起，控制器本地故障会先关闭并确认自有 SSH，再持续退避重连；旧版本遗留的 `LOCAL_ERROR` 阻断仅在新 daemon 完成 SSH 所有权恢复检查后解除。CLI 0.1.12 以 SSH 主进程 `exit` 作为 listener 释放证明，不再因后代进程延迟关闭继承的 stdout/stderr 管道而误报 `CLEANUP_FAILED`。重启恢复遇到仅剩私有 `owner.json`、control socket 已消失的目录时，只有保存的 PID 也被 `ps` 明确证明不存在才删除孤儿元数据；PID 仍存在、复用或无法查询都保持阻断。主进程确实无法退出或所有权无法确认时仍停止自动连接。所有自动重试最长间隔 30 秒，成功后连续失败计数归零；不会取消 Device 睡眠、创建新的 Lease 或延长已有 TTL。
+CLI 0.1.9 起，普通断网、心跳超时、HTTP 408/429/5xx 持续退避重连，最长间隔 30 秒；睡眠唤醒后处理已过期的重连计时。CLI 0.1.10 起，SSH 退出、启动/命令超时、链路或 listener 丢失等 Forward Instance 瞬态故障也持续退避重试。CLI 0.1.11 起，控制器本地故障会先关闭并确认自有 SSH，再持续退避重连；旧版本遗留的 `LOCAL_ERROR` 阻断仅在新 daemon 完成 SSH 所有权恢复检查后解除。CLI 0.1.12 以 SSH 主进程 `exit` 作为 listener 释放证明，不再因后代进程延迟关闭继承的 stdout/stderr 管道而误报 `CLEANUP_FAILED`。重启恢复遇到仅剩私有 `owner.json`、control socket 已消失的目录时，只有保存的 PID 也被 `ps` 明确证明不存在才删除孤儿元数据；PID 仍存在、复用或无法查询都保持阻断。CLI 0.1.13 对主进程退出后 control socket 同时消失造成的私有目录删除竞态执行三次短暂有界重试；只有 `EBUSY`、`EMFILE`、`ENFILE`、`ENOTEMPTY` 或 `EPERM` 会重试，其他错误和重试耗尽仍停止自动连接。status 额外记录白名单化的 `lastCleanupErrorCode`，不写入路径或原始错误。主进程确实无法退出或所有权无法确认时仍停止自动连接。所有自动重试最长间隔 30 秒，成功后连续失败计数归零；不会取消 Device 睡眠、创建新的 Lease 或延长已有 TTL。
 
 Host 0.1.13 在新的 Connection Session 收到 persisted `recovering` 快照后重新下发 fenced Open，并持续重发未确认的幂等 operation。CLI 与 Host 两端都升级后，普通断线恢复不需要点击“重新检查”。认证、Host Key、端口占用、策略拒绝、撤销和到期仍安全停止自动恢复。
 
-CLI 修复必须安装到 Device；单独升级 Host 不会替换已运行的 CLI。Host 分发新版后，在 Device 重跑该 Host 页面生成的统一命令，并用已安装 CLI 的 `--version` 确认版本为 0.1.12 或更新。status 中的 `nextReconnectAt`、`lastDisconnectReason` 等是持久诊断，不等同实时在线；认证、证书、协议、凭证、状态写入或清理失败等安全阻断不会因后台重启自动清除。
+CLI 修复必须安装到 Device；单独升级 Host 不会替换已运行的 CLI。Host 分发新版后，在 Device 重跑该 Host 页面生成的统一命令，并用已安装 CLI 的 `--version` 确认版本为 0.1.13 或更新。status 中的 `nextReconnectAt`、`lastDisconnectReason` 等是持久诊断，不等同实时在线；认证、证书、协议、凭证、状态写入或清理失败等安全阻断不会因后台重启自动清除。
 
 ## Host 改变或配对失效
 

@@ -19,7 +19,7 @@
 - [ ] Device Chrome 请求 localhost:5173 实际到达 devbox 127.0.0.1:5173，两个端口相同。
 - [ ] lsof 确认只监听 127.0.0.1，不能出现 0.0.0.0 或 IPv6 wildcard；不存在额外 forward。
 - [ ] 认证失败、未知/变化 Host Key、端口被第三方占用均停止自动恢复。
-- [ ] 网络抖动/WSS 丢失关闭自有 SSH，重连先快照；CLI 0.1.12 在连续超过五次控制通道、Forward Instance 或控制器本地瞬态失败后仍退避重试，Host 为 `recovering` 快照重新下发 fenced Open，无需人工重新检查；SSH 主进程退出但继承 stdio 延迟关闭时不得误报清理失败；socket 消失且保存 PID 明确不存在时清理孤儿 owner 目录，PID 存活、复用或无法确认时必须停止自动连接。
+- [ ] 网络抖动/WSS 丢失关闭自有 SSH，重连先快照；CLI 0.1.13 在连续超过五次控制通道、Forward Instance 或控制器本地瞬态失败后仍退避重试，Host 为 `recovering` 快照重新下发 fenced Open，无需人工重新检查；SSH 主进程退出但继承 stdio 延迟关闭时不得误报清理失败；socket 消失且保存 PID 明确不存在时清理孤儿 owner 目录，PID 存活、复用或无法确认时必须停止自动连接；退出后的 control 目录删除遇到白名单内瞬态文件系统错误时有界重试，非瞬态错误和重试耗尽继续阻断，status 只报告白名单错误码。
 - [ ] Device 断网及整夜睡眠后，无手动启动操作即可在网络恢复时重连；过期 Lease 不复活，未过期 Lease 必须重新获得 Host 对账授权。
 - [ ] 认证/证书/协议及清理失败停止自动连接；status 保留安全原因码与时间，不泄露 token 或原始错误。
 - [ ] 手动 restart 的 close 已确认后才 open；TTL 没有延长。

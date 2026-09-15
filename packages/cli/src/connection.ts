@@ -20,8 +20,11 @@ const systemClock: ConnectionClock = {
 }
 export const CONNECTION_REASONS = ['NETWORK_ERROR', 'TLS_ERROR', 'PROTOCOL_ERROR', 'HTTP_ERROR', 'AUTHENTICATION_REJECTED', 'AUTHORITY_CHANGED', 'REMOTE_CLOSE', 'HOST_HELLO_TIMEOUT', 'HEARTBEAT_TIMEOUT', 'CREDENTIAL_UNAVAILABLE', 'CLEANUP_FAILED', 'LOCAL_ERROR', 'STATUS_WRITE_FAILED'] as const
 export type ConnectionReason = typeof CONNECTION_REASONS[number]
+export const CLEANUP_ERROR_CODES = ['SSH_STOP_TIMEOUT', 'SSH_STOP_FAILED', 'SSH_OWNERSHIP_UNVERIFIED', 'EBUSY', 'EMFILE', 'ENFILE', 'ENOTEMPTY', 'EPERM', 'EACCES', 'ENOSPC', 'EIO', 'UNKNOWN'] as const
+export type CleanupErrorCode = typeof CLEANUP_ERROR_CODES[number]
 export interface ConnectionDetails {
   lastDisconnectReason?: ConnectionReason
+  lastCleanupErrorCode?: CleanupErrorCode
   lastDisconnectAt?: string
   lastConnectedAt?: string
   lastCloseCode?: number
@@ -31,6 +34,7 @@ export interface ConnectionDetails {
 export function connectionDetails(value: Record<string, unknown>): ConnectionDetails {
   const result: ConnectionDetails = {}
   if (CONNECTION_REASONS.includes(value.lastDisconnectReason as ConnectionReason)) result.lastDisconnectReason = value.lastDisconnectReason as ConnectionReason
+  if (CLEANUP_ERROR_CODES.includes(value.lastCleanupErrorCode as CleanupErrorCode)) result.lastCleanupErrorCode = value.lastCleanupErrorCode as CleanupErrorCode
   for (const key of ['lastDisconnectAt', 'lastConnectedAt', 'nextReconnectAt'] as const) {
     const date = value[key]
     if (typeof date === 'string' && date.length <= 32 && Number.isFinite(Date.parse(date))) result[key] = new Date(date).toISOString()
@@ -50,6 +54,17 @@ function transportErrorReason(error: unknown): ConnectionReason {
   if (code.startsWith('WS_ERR_')) return 'PROTOCOL_ERROR'
   if (code.startsWith('ERR_TLS_') || ['CERT_HAS_EXPIRED', 'DEPTH_ZERO_SELF_SIGNED_CERT', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'SELF_SIGNED_CERT_IN_CHAIN', 'CERT_NOT_YET_VALID', 'UNABLE_TO_GET_ISSUER_CERT', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY'].includes(code)) return 'TLS_ERROR'
   return 'NETWORK_ERROR'
+}
+function cleanupErrorCode(error: unknown): CleanupErrorCode {
+  if (error instanceof AggregateError) {
+    for (const nested of error.errors) {
+      const code = cleanupErrorCode(nested)
+      if (code !== 'UNKNOWN' && code !== 'SSH_STOP_FAILED') return code
+    }
+  }
+  const candidate = typeof error === 'object' && error !== null && 'code' in error ? String(error.code) :
+    error instanceof Error ? error.message : ''
+  return CLEANUP_ERROR_CODES.includes(candidate as CleanupErrorCode) ? candidate as CleanupErrorCode : 'UNKNOWN'
 }
 
 export interface ConnectionOptions {
@@ -91,6 +106,7 @@ export async function runControlChannel(options: ConnectionOptions): Promise<voi
   let cleanup = Promise.resolve()
   let statusTail = Promise.resolve()
   let lastDisconnectReason = options.previous.lastDisconnectReason
+  let lastCleanupErrorCode = options.previous.lastCleanupErrorCode
   let lastDisconnectAt = options.previous.lastDisconnectAt
   let lastCloseCode = options.previous.lastCloseCode
   let lastHttpStatus = options.previous.lastHttpStatus
@@ -101,7 +117,7 @@ export async function runControlChannel(options: ConnectionOptions): Promise<voi
     // Snapshot before awaiting IO. Never persist tokens, response bodies, close reason text or raw errors.
     const value = { state, reconnectAttempts: attempts, pairingRequired, automaticRetryBlocked,
       deviceId: config.deviceId, pid: process.pid, companionVersion: VERSION, bootId,
-      updatedAt: new Date(clock.now()).toISOString(), lastDisconnectReason, lastDisconnectAt,
+      updatedAt: new Date(clock.now()).toISOString(), lastDisconnectReason, lastCleanupErrorCode, lastDisconnectAt,
       lastCloseCode, lastHttpStatus, lastConnectedAt,
       nextReconnectAt: nextReconnectAt === undefined ? undefined : new Date(nextReconnectAt).toISOString() }
     statusTail = statusTail.then(() => options.writeStatus(value))
@@ -109,7 +125,7 @@ export async function runControlChannel(options: ConnectionOptions): Promise<voi
   }
   const clearRetry = () => { retryGeneration++; retryArmed = false; nextReconnectAt = undefined; cancelRetry?.(); cancelRetry = undefined }
   const recordDisconnect = (reason: ConnectionReason, closeCode?: number, httpStatus?: number) => {
-    lastDisconnectReason = reason; lastDisconnectAt = new Date(clock.now()).toISOString()
+    lastDisconnectReason = reason; lastCleanupErrorCode = undefined; lastDisconnectAt = new Date(clock.now()).toISOString()
     lastCloseCode = closeCode; lastHttpStatus = httpStatus
   }
   const invalidate = (ws: WebSocket) => {
@@ -128,9 +144,10 @@ export async function runControlChannel(options: ConnectionOptions): Promise<voi
     clearRetry()
     const generation = retryGeneration
     automaticRetryBlocked ||= permanent
-    try { await cleanup } catch {
+    try { await cleanup } catch (error) {
       if (stopping || generation !== retryGeneration) return
-      automaticRetryBlocked = true; recordDisconnect('CLEANUP_FAILED'); await status('cleanup_failed'); return
+      automaticRetryBlocked = true; recordDisconnect('CLEANUP_FAILED'); lastCleanupErrorCode = cleanupErrorCode(error)
+      await status('cleanup_failed'); return
     }
     if (stopping || generation !== retryGeneration) return
     attempts = Math.min(Number.MAX_SAFE_INTEGER, attempts + 1)

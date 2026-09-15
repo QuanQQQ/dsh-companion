@@ -287,6 +287,29 @@ test('process exit proves cleanup even when inherited stdio delays close', async
   assert.deepEqual(await readdir(f.root), [])
 })
 
+test('transient private-directory removal races retry and then complete cleanup', async t => {
+  let removals = 0
+  const f = await fixture(t, { removeDirectory: async path => {
+    removals += 1
+    if (removals < 3) throw Object.assign(new Error('transient removal race'), { code: 'ENOTEMPTY' })
+    await rm(path, { recursive: true, force: true })
+  } })
+  await f.executor.start('lease', 3080)
+  await f.executor.stop('lease')
+  assert.equal(removals, 3)
+  assert.deepEqual(await readdir(f.root), [])
+})
+
+test('private-directory removal retries are bounded and retain ownership evidence', async t => {
+  let removals = 0
+  const failure = Object.assign(new Error('transient removal race'), { code: 'ENOTEMPTY' })
+  const f = await fixture(t, { removeDirectory: async () => { removals += 1; throw failure } })
+  const started = await f.executor.start('lease', 3080)
+  await assert.rejects(f.executor.stop('lease'), error => error === failure)
+  assert.equal(removals, 4)
+  assert.ok(await lstat(join(dirname(started.controlPath), 'owner.json')))
+})
+
 test('unconfirmed termination is an error, retains metadata, and allows safe retry', async t => {
   const f = await fixture(t, { terminateTimeoutMs: 10 })
   f.state.configureChild = child => { child.exitOn = undefined }

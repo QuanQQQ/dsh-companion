@@ -17,6 +17,8 @@ export interface SshExecutorOptions {
   spawn?: SshSpawn
   /** Signals only a live, detached master created by this executor. Test spawns must inject this too. */
   signalGroup?: (child: ChildProcess, signal: 'SIGTERM' | 'SIGKILL') => void
+  /** Test seam for one recursive removal attempt; production retries transient filesystem races. */
+  removeDirectory?: (path: string) => Promise<void>
   startupTimeoutMs?: number
   commandTimeoutMs?: number
   terminateTimeoutMs?: number
@@ -46,6 +48,8 @@ interface Owner { version?: 2; leaseId: string; sshHost: string; pid: number; po
 const SSH = '/usr/bin/ssh'
 const LSOF = process.platform === 'darwin' ? '/usr/sbin/lsof' : '/usr/bin/lsof'
 const MAX_COMMAND_OUTPUT = 256 * 1024
+const REMOVE_RETRY_CODES = new Set(['EBUSY', 'EMFILE', 'ENFILE', 'ENOTEMPTY', 'EPERM'])
+const REMOVE_RETRY_DELAYS_MS = [25, 50, 100] as const
 const SECURITY_OPTIONS = [
   'BatchMode=yes', 'StrictHostKeyChecking=yes',
   'ForwardAgent=no', 'ForwardX11=no', 'ForwardX11Trusted=no', 'PermitLocalCommand=no',
@@ -96,7 +100,8 @@ export class SshExecutor {
   private readonly spawn: SshSpawn
   private readonly runner: SshRunner
   private readonly signalGroup: NonNullable<SshExecutorOptions['signalGroup']>
-  private readonly settings: Required<Omit<SshExecutorOptions, 'runner' | 'spawn' | 'signalGroup'>>
+  private readonly removeDirectory: NonNullable<SshExecutorOptions['removeDirectory']>
+  private readonly settings: Required<Omit<SshExecutorOptions, 'runner' | 'spawn' | 'signalGroup' | 'removeDirectory'>>
   private readonly instances = new Map<string, Instance>()
   private readonly pending = new Map<string, Pending>()
   private stoppingAll = false
@@ -112,6 +117,7 @@ export class SshExecutor {
       try { process.kill(-child.pid!, signal) }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error }
     })
+    this.removeDirectory = options.removeDirectory ?? (path => rm(path, { recursive: true, force: true }))
     this.settings = {
       startupTimeoutMs: options.startupTimeoutMs ?? 30_000,
       commandTimeoutMs: options.commandTimeoutMs ?? 2_000,
@@ -240,7 +246,7 @@ export class SshExecutor {
     const deadline = Date.now() + this.settings.terminateTimeoutMs * 2
     do {
       const ps = await this.command('/bin/ps', ['-p', String(owner.pid), '-o', 'pid='], Math.max(1, deadline - Date.now()))
-      if (ps.code === 1 && !ps.stdout.trim() && !ps.stderr.trim()) { await rm(directory, { recursive: true, force: true }); return }
+      if (ps.code === 1 && !ps.stdout.trim() && !ps.stderr.trim()) { await this.removeOwnedDirectory(directory); return }
       await delay(Math.min(this.settings.pollIntervalMs, Math.max(1, deadline - Date.now())))
     } while (Date.now() < deadline)
     fail('SSH_STOP_TIMEOUT')
@@ -295,7 +301,7 @@ export class SshExecutor {
       }
     } catch (error) {
       if (instance) await this.terminate(instance)
-      else if (directory) await rm(directory, { recursive: true, force: true })
+      else if (directory) await this.removeOwnedDirectory(directory)
       throw error
     }
   }
@@ -330,7 +336,7 @@ export class SshExecutor {
         if (!instance.exited && instance.pid > 0) this.signalGroup(instance.child, 'SIGKILL')
         if (!await waitBounded(instance.exitDone, this.settings.terminateTimeoutMs)) fail('SSH_STOP_TIMEOUT')
       }
-      await rm(instance.directory, { recursive: true, force: true })
+      await this.removeOwnedDirectory(instance.directory)
       if (this.instances.get(instance.leaseId) === instance) this.instances.delete(instance.leaseId)
     })()
     // Keep unconfirmed children tracked, and permit a later stop retry.
@@ -345,8 +351,19 @@ export class SshExecutor {
     // proves this socket-less metadata cannot represent a surviving authorized listener.
     const ps = await this.command('/bin/ps', ['-p', String(owner.pid), '-o', 'pid='], this.settings.commandTimeoutMs)
     if (ps.code !== 1 || ps.stdout.trim() || ps.stderr.trim()) return false
-    await rm(directory, { recursive: true, force: true })
+    await this.removeOwnedDirectory(directory)
     return true
+  }
+
+  private async removeOwnedDirectory(directory: string): Promise<void> {
+    for (let attempt = 0; ; attempt++) {
+      try { await this.removeDirectory(directory); return }
+      catch (error) {
+        const code = (error as NodeJS.ErrnoException).code
+        if (!code || !REMOVE_RETRY_CODES.has(code) || attempt >= REMOVE_RETRY_DELAYS_MS.length) throw error
+        await delay(REMOVE_RETRY_DELAYS_MS[attempt]!)
+      }
+    }
   }
 
   private async verifyMaster(owner: Pick<Owner, 'pid' | 'controlPath'>, timeout: number): Promise<boolean> {

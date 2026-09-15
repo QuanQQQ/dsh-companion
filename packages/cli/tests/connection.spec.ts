@@ -163,13 +163,16 @@ test('a rejected Host operation also fails closed and reconnects with a fresh se
 test('a local controller failure still blocks if fail-closed SSH cleanup cannot complete', async t => {
   let failTick = true
   const controller: ConnectionOptions['controller'] = {
-    initialize: async () => {}, connect: () => {}, disconnect: async () => { throw new Error('unsafe cleanup') }, execute: async () => ({ ok: true }),
+    initialize: async () => {}, connect: () => {}, disconnect: async () => {
+      throw new AggregateError([Object.assign(new Error('private path omitted'), { code: 'ENOTEMPTY' })], 'SSH_STOP_FAILED')
+    }, execute: async () => ({ ok: true }),
     expireNow: async () => {}, tick: async () => { if (failTick) { failTick = false; throw new Error('local transient failure') } },
   }
   const f = await fixture(t, { controller })
   f.sockets[0]!.hello(f.clock.now()); await flush()
   await f.clock.advance(1000)
   assert.equal(f.latest().lastDisconnectReason, 'CLEANUP_FAILED')
+  assert.equal(f.latest().lastCleanupErrorCode, 'ENOTEMPTY')
   assert.equal(f.latest().state, 'cleanup_failed')
   assert.equal(f.latest().automaticRetryBlocked, true)
   await f.clock.advance(60000)
@@ -239,7 +242,8 @@ test('credential/storage failures, persisted safety blocks and shutdown cannot r
 
 test('backoff and diagnostics are bounded and do not serialize arbitrary error content',()=>{
   for(const n of [1,2,5,6,100,Number.MAX_SAFE_INTEGER])for(const jitter of [0,0.5,1])assert.ok(reconnectDelay(n,jitter)<=30000)
-  assert.deepEqual(connectionDetails({lastDisconnectReason:'secret',lastCloseCode:99999,lastHttpStatus:'secret',lastDisconnectAt:'secret',token:'secret'}),{})
+  assert.deepEqual(connectionDetails({lastDisconnectReason:'CLEANUP_FAILED',lastCleanupErrorCode:'ENOTEMPTY'}),{lastDisconnectReason:'CLEANUP_FAILED',lastCleanupErrorCode:'ENOTEMPTY'})
+  assert.deepEqual(connectionDetails({lastDisconnectReason:'secret',lastCleanupErrorCode:'private path',lastCloseCode:99999,lastHttpStatus:'secret',lastDisconnectAt:'secret',token:'secret'}),{})
 })
 
 test('real WebSocket handshake recovers after seven HTTP 503 responses and shuts down cleanly',async t=>{
