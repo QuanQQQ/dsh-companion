@@ -258,3 +258,9 @@ Stable 0.1.16 已于 `2026-09-15T05:09:59.756Z` 安装，真实 Mac 已运行 CL
 SSH 主进程已经退出且只有一个目录保留，证明 `stopAll()` 失败发生在退出后的目录删除阶段。CLI 0.1.13 对 `EBUSY`、`EMFILE`、`ENFILE`、`ENOTEMPTY`、`EPERM` 执行 25/50/100 毫秒的三次有界重试；非白名单错误或第四次失败继续保留 owner 证据并阻断连接。`CLEANUP_FAILED` status 新增白名单化 `lastCleanupErrorCode`，AggregateError 会提取首个安全子错误码，不持久化路径、原始 message 或其他任意内容。
 
 新增瞬态删除竞态成功重试、重试耗尽保留 owner，以及嵌套 `ENOTEMPTY` 诊断测试。本地 `pnpm -r check` 通过：Plugin 95 项、CLI 172 项，类型检查和两包构建成功；PDM 单插件项目 `dsh-companion-package-validation` check 通过。最终开发 bundle 为 CLI 0.1.13，SHA-256 为 `29dea036506fac4da024edc7005b770b152dca8e7bea76aa910d331d0f33870c`。真实 Mac 重跑现有 0.1.12 统一启动命令后，control 通道在线，3120、3334、4327 全部恢复 running。本阶段尚未提交、发布、排队或修改 Stable。
+
+## 2026-09-15：Host 0.1.17 / CLI 0.1.13 发布与 Stable 排队
+
+发布提交 `fcf0a83e23e44909e814fa324b728116432ca4f6` 已推送至远端 main。PDM 单插件项目 `dsh-companion-package-validation` 对该提交重新执行检查、归档重建、干净 DSH_HOME 安装和启动验证，生成并晋级制品 `dsh-companion-0.1.17-d5ed2609b0d8.tgz`，SHA-256 为 `d5ed2609b0d8e1a846ca2d8d8037f7c374f686ced89a9d993861d8a7c0089e5e`，allowBuilds 为空。
+
+该精确制品于 `2026-09-15T12:53:50.697Z` 进入 Stable 安全更新队列，状态为 `waiting-for-idle`。队列内已有两个其他项目的 Pending 更新，实际应用顺序和 Host 重启由 PDM idle gate/quiet window 决定；队列应用前 Stable 仍为 Host 0.1.16，真实 Mac 仍为 CLI 0.1.12。Host 安装 0.1.17 后，Device 必须重跑该页面的统一启动命令，才能安装 CLI 0.1.13。
