@@ -244,3 +244,9 @@ Stable 0.1.15 已于 2026-09-14 15:22:41 +08:00 安装，真实 Mac 也已运行
 现场与清理代码共同定位到退出证明的层级错误：Node `ChildProcess` 的 `exit` 已证明自有 SSH 主进程及其 listener 消失，但旧实现继续等待可能被后代进程持有的 stdout/stderr 管道触发 `close`；超时后把实际已完成的清理误报为 `CLEANUP_FAILED`。CLI 0.1.12 将退出证明改为主进程 `exit`，`close` 仍负责最终流排空和退出回调；真正没有退出的进程仍执行 TERM→KILL，并在两次有界等待后保持 `SSH_STOP_TIMEOUT/CLEANUP_FAILED`。
 
 新增“主进程已退出但 stdio 延迟 close”和“control socket 消失且保存 PID 不存在时清理孤儿 owner 目录”回归测试，并保留 live/reused PID、无法退出、stopAll 部分失败和元数据篡改阻断测试。本地 `pnpm -r check` 通过：Plugin 95 项、CLI 170 项，类型检查和两包构建成功；PDM 单插件项目 `dsh-companion-package-validation` check 通过。最终开发 bundle 为 CLI 0.1.12，SHA-256 为 `671c853736e35ced8be4b28e900ffb0e1c9512e1e9a4f5871ae000f751e8eeff`。本阶段尚未提交、发布、排队或修改 Stable；真实 Mac 仍保留故障现场，未用未发布代码作生产验收。
+
+## 2026-09-15：Host 0.1.16 / CLI 0.1.12 发布与 Stable 排队
+
+发布提交 `7c3e4fd4a4122672327e16929927bb72edd7b296` 已推送至远端 main。PDM 单插件项目 `dsh-companion-package-validation` 对该提交重新执行检查、归档重建、干净 DSH_HOME 安装和启动验证，生成并晋级制品 `dsh-companion-0.1.16-50b0ee6849f3.tgz`，SHA-256 为 `50b0ee6849f38e593e0801f12d5cc581851e77ad645e6c512826ac554b59160f`，allowBuilds 为空。
+
+该精确制品于 `2026-09-15T05:04:42.606Z` 进入 Stable 安全更新队列，状态为 `waiting-for-idle`。队列应用前 Stable 仍为 Host 0.1.15，真实 Mac 仍为 CLI 0.1.11；Host 安装 0.1.16 后，Device 必须重跑该页面的统一启动命令，才能安装 CLI 0.1.12 并执行本次孤儿目录安全恢复。
