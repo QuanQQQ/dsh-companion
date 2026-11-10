@@ -36,4 +36,4 @@ owner浏览器认证和Agent scope分别执行；API Peer不获得human approval
 
 ## 验证边界
 
-只执行源码typecheck/build、unit与isolated fixture测试。PDM隔离GUI及真实Mac均不执行。测试结果、skip及限制按test-cases写入acceptance-report，不沿用旧VERIFICATION成功结论。
+执行源码typecheck/build、unit、真实自有systemd fixture及隔离DSH profile的浏览器验收。常驻实例安装使用官方plugin manager，页面复查只查看入口和插件状态，不读取用户任务内容。真实Mac与两设备数据路径尚未验证；Linux及SSH fixture不作为这两项的通过证据。测试结果、skip及限制写入acceptance-report。

@@ -1,6 +1,6 @@
 # 验收用例
 
-Review：依据用户已确认范围由实现者准备，提供leader review入口；普通源码/单测自主执行。真实GUI/Mac条件未具备。
+Review：实现由gpt-6-astra独立审查，浏览器验收由gpt-6.1-terra执行。GUI使用隔离DSH profile和自有测试服务；真实Mac与两设备数据路径尚未验证。
 
 | Case | 验证目标与前置 | 操作 | 可观察预期 |
 | --- | --- | --- | --- |
@@ -17,7 +17,7 @@ Review：依据用户已确认范围由实现者准备，提供leader review入�
 | LAUNCH-2 | controlled generation/clock | stale、wrong generation、pending、error、ready | 同代新鲜online观测才ready；等待超时不撤销/续期/停服务 |
 | UI-1 | 纯view model及组件契约测试 | 空/加载/error/跨Workspace/日志设置状态 | 原生slot正确，紧凑卡片字段和动作准确，无重复配对 |
 | BUILD-1 | 精确0.2.1-rc.5依赖 | pnpm typecheck/test/build | 真实命令成功，无旧webRuntime/BetterSidebar依赖 |
-| WEB-1 | PDM工具与隔离GUI | 实际浏览器交互保存回读 | 后续未验证；不能用mock作通过证据 |
+| WEB-1 | 官方安装包与隔离DSH profile | 实际浏览器交互保存回读 | 同一服务记录的创建、命令确认、启动、日志、重启、停止、刷新和移除；不能用mock作通过证据 |
 | MAC-REAL-1 | 两设备实际Mac | launchd/Keychain/休眠/断网/端口数据路径 | 后续未验证；Linuxfixture不能替代 |
 
 | OPERATOR-1 | owner-only真实HTTP与私有proof | review后确认digest，伪造proof、配置变化、撤销登录和restart双次校验 | 仅同一请求/操作/服务配置通过；完成后proof失效，命令不进入snapshot |
