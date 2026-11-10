@@ -17,7 +17,7 @@ import {
   type WireInstanceObservation,
 } from './protocol.js'
 import type { CompanionService, ObserveInstanceInput } from './service.js'
-import { isTrustedCompanionRequest } from './trust.js'
+import { isTrustedCompanionRequest, type CompanionTrustFence } from './trust.js'
 
 export const COMPANION_DEVICE_WS_PATH = '/api/companion/device'
 export const DEFAULT_HEARTBEAT_MS = 15_000
@@ -53,7 +53,7 @@ export class CompanionDeviceHub {
 
   constructor(
     private readonly service: CompanionService,
-    private readonly trustedHosts: readonly string[],
+    private readonly trustedHosts: CompanionTrustFence,
     private readonly heartbeatMs = DEFAULT_HEARTBEAT_MS,
     private readonly reconcileBeforeSnapshot?: (() => Promise<void>) | undefined,
   ) {

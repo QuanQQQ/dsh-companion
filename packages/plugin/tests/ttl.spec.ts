@@ -1,3 +1,4 @@
+import { browserAuth } from './auth-fixture.js'
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { createServer } from 'node:http'
@@ -70,7 +71,7 @@ test('AI open defaults to 10080 minutes and rejects an authorization longer than
 
 test('authenticated HTTP open shares the week default and enforces its upper boundary', async t => {
   const f = await fixture()
-  const route = createCompanionHttpRoute(f.service, [], undefined, undefined, undefined, { requestRejection: req => req.headers.cookie === 'test=yes' ? undefined : 401 })
+  const route = createCompanionHttpRoute(f.service, [], undefined, undefined, undefined, browserAuth(req => req.headers.cookie === 'test=yes'))
   const server = createServer((req, res) => { void route.handler(req, res) })
   server.listen(0, '127.0.0.1'); await once(server, 'listening')
   t.after(async () => { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())) })

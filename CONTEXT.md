@@ -36,7 +36,7 @@ _Avoid_: Pairing, Device
 ## Services and Forwarding
 
 **Service**:
-A Host-global declaration that a service is expected on a devbox loopback port. One active declaration exists per port. A Service is independent of Task, Session, and Agent cwd; its existence is not permission to expose the port on any Device.
+A Host-global declaration that a service is expected on a devbox loopback port. One active declaration exists per port. Manual declarations retain Host-global management. Managed declarations retain provider and project ownership; Agent mutations require the calling Workspace. A declaration alone grants no permission to expose its port on a Device.
 _Avoid_: Task Service, Tunnel, Forward
 
 **Service Registration**:
@@ -96,3 +96,11 @@ _Avoid_: Error severity
 **Lease Expiry**:
 The end of Forward Lease authority at its Host-defined deadline. Expiry closes Desired State even while the Device is offline and cannot be extended by reconciliation.
 _Avoid_: Idle timeout
+
+## Linux Development Services
+
+**Development Service**: A persisted executable, literal arguments, project root, working directory and port supervised by an independently owned Linux systemd user unit. It is distinct from the Companion forwarding declaration.
+
+**Owner Launch Review**: An authenticated browser view of one fixed command configuration. Explicit confirmation binds the operation to its digest through an in-process proof. Agent calls retain their own Workspace and sandbox policy; an API Peer cannot obtain browser approval.
+
+**Linux Readiness**: Verified unit ownership, owned listener inode and a successful IPv4 loopback connection. It does not prove application business health. A stopped intention is not evidence that the process has stopped.

@@ -19,6 +19,10 @@ export interface InstanceObservation {
   sshChild: 'unknown' | 'running' | 'exited'
   listener: 'unknown' | 'owned' | 'missing' | 'conflict'
   remoteProbe: 'unknown' | 'healthy' | 'failed' | 'disabled'
+  /** Actual owned TCP sample (or verified-stop listener scan), never serialization time. */
+  sampledAt?: string | undefined
+  /** Monotonic elapsed time since that sample, recomputed for each wire report. */
+  probeAgeMs?: number | undefined
   processId?: number | undefined
   retryAttempt?: number | undefined
   retryAt?: string | undefined

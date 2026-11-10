@@ -5,15 +5,12 @@ import { renderBootstrapScript } from './bootstrap.js'
 import { CompanionEnrollmentService, EnrollmentError } from './enrollment.js'
 import { CompanionError } from './domain.js'
 import type { CompanionService } from './service.js'
-import { isTrustedCompanionRequest } from './trust.js'
+import { isTrustedCompanionRequest, type CompanionTrustFence } from './trust.js'
+import { ownerBrowserRejection, type CompanionRequestAuthenticator } from './owner-browser.js'
+export type { CompanionRequestAuthenticator } from './owner-browser.js'
 
 export const COMPANION_API_PREFIX = '/api/companion'
 export const DEFAULT_MAX_JSON_BODY_BYTES = 64 * 1024
-
-/** Structural subset of the public HostConnectionHandle authentication API. */
-export interface CompanionRequestAuthenticator {
-  requestRejection(request: { headers: Record<string, string | string[] | undefined> }): 401 | 403 | undefined
-}
 
 export interface CompanionHttpRoute {
   kind: 'prefix'
@@ -23,7 +20,7 @@ export interface CompanionHttpRoute {
 
 export function createCompanionHttpRoute(
   service: CompanionService,
-  trustedHosts: readonly string[],
+  trustedHosts: CompanionTrustFence,
   maxBodyBytes = DEFAULT_MAX_JSON_BODY_BYTES,
   _legacyTaskResolver?: unknown,
   cliBundleUrl = new URL('./companion-cli.mjs', import.meta.url),
@@ -46,11 +43,7 @@ export function createCompanionHttpRoute(
         const publicRequest = (req.method === 'GET' && ['/bootstrap.sh', '/bootstrap/cli.mjs', '/identity'].includes(relative)) ||
           (req.method === 'POST' && ['/pair', '/enrollments/start', '/enrollments/poll', '/device/verify'].includes(relative))
         if (!publicRequest) {
-          if (typeof authentication?.requestRejection !== 'function') {
-            sendError(res, 503, 'AUTH_UNAVAILABLE', 'Host Connection authentication API is unavailable')
-            return
-          }
-          const rejection = authentication.requestRejection(req)
+          const rejection = ownerBrowserRejection(authentication, req)
           if (rejection !== undefined) {
             if (rejection === 401) sendError(res, 401, 'UNAUTHORIZED', 'Host browser authentication is required')
             else if (rejection === 403) sendError(res, 403, 'FORBIDDEN', 'Host Connection rejected this request')
@@ -117,6 +110,11 @@ export function createCompanionHttpRoute(
           return
         }
         const body = await readJsonObject(req, maxBodyBytes)
+        // Body streaming is an await boundary: a released Peer must not retain mutation authority.
+        if (!publicRequest) {
+          const rejection = ownerBrowserRejection(authentication, req)
+          if (rejection !== undefined) { sendError(res, rejection, rejection === 503 ? 'AUTH_UNAVAILABLE' : 'UNAUTHORIZED', 'Browser session is no longer authorized'); return }
+        }
 
         if (relative === '/enrollments/start') {
           const request = enrollment.start({
@@ -212,6 +210,7 @@ export function createCompanionHttpRoute(
       } catch (error) {
         if (error instanceof BodyError) sendError(res, error.status, error.code, error.message)
         else if (error instanceof CompanionError || error instanceof EnrollmentError) sendError(res, error.status, error.code, error.message)
+        else if (error instanceof Error && error.message.startsWith('Connection ')) sendError(res, 503, 'AUTH_UNAVAILABLE', 'Connection trust API unavailable')
         else {
           console.error('dsh-companion: HTTP request failed', error)
           sendError(res, 500, 'INTERNAL_ERROR', 'Companion request failed')

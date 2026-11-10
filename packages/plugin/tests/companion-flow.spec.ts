@@ -31,6 +31,9 @@ class FakeTunnelExecutor implements TunnelExecutor {
   async stop(leaseId: string) { this.owned.delete(leaseId) }
   async stopAll() { this.owned.clear() }
   async isOwned(leaseId: string) { return this.owned.has(leaseId) }
+  async listenerState(port: number): Promise<'missing' | 'conflict'> {
+    return this.starts.some(item => item.port === port && this.owned.has(item.leaseId)) ? 'conflict' : 'missing'
+  }
 }
 
 async function until(predicate: () => boolean, description: string): Promise<void> {

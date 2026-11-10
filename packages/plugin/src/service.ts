@@ -22,6 +22,7 @@ import {
   type CompanionSnapshot,
 } from './domain.js'
 import { normalizeState, type CompanionStateStore } from './store.js'
+import type { ManagedServiceInput } from './managed-services.js'
 
 export const OPERATION_RETRY_MS = 15_000
 const MAX_RECORDED_ATTEMPTS = Number.MAX_SAFE_INTEGER - 4
@@ -261,7 +262,9 @@ export class CompanionService {
     let result!: RegisteredService
     await this.transact(state => {
       const existing = state.services.find(service => service.port === port && !service.archivedAt)
+      if (!existing && state.services.some(item => item.port === port && item.managedOwner)) throw new CompanionError('LOCAL_PORT_IN_USE', 'Port is reserved by a managed tombstone', 409)
       if (existing) {
+        if (existing.managedOwner) throw new CompanionError('LOCAL_PORT_IN_USE', 'Port belongs to a managed service; manual registration cannot overwrite it', 409)
         existing.name = name
         existing.protocol = protocol
         existing.source = source
@@ -281,6 +284,65 @@ export class CompanionService {
         }
         state.services.push(result)
       }
+    })
+    return structuredClone(result)
+  }
+
+  async ensureManagedService(input: ManagedServiceInput): Promise<RegisteredService> {
+    return this.managedDeclaration(input, false)
+  }
+
+  async retireManagedService(input: ManagedServiceInput): Promise<RegisteredService> {
+    return this.managedDeclaration(input, true)
+  }
+
+  private async managedDeclaration(input: ManagedServiceInput, retire: boolean): Promise<RegisteredService> {
+    const owner = validateManagedOwner(input.owner)
+    const name = assertNonEmpty(input.name, 'name')
+    const port = assertPort(input.port)
+    const protocol = validateProtocol(input.protocol)
+    let result!: RegisteredService
+    await this.transact(state => {
+      const now = this.clock.now()
+      const existing = state.services.find(item => sameManagedOwner(item.managedOwner, owner))
+      if (existing) {
+        if (existing.port !== port || existing.protocol !== protocol || existing.workspaceId !== input.workspaceId || existing.workspacePath !== input.workspacePath) {
+          throw new CompanionError('VALIDATION_ERROR', 'Managed service owner cannot change its port, protocol or Workspace', 409)
+        }
+        result = existing
+      } else {
+        if (state.services.some(item => item.port === port && (!item.archivedAt || item.managedOwner))) {
+          throw new CompanionError('LOCAL_PORT_IN_USE', 'Port is reserved by another declaration or managed tombstone', 409)
+        }
+        result = { id: this.ids.randomId('svc'), managedOwner: owner, name, port, protocol, source: 'process',
+          createdAt: iso(now), updatedAt: iso(now),
+          ...(input.workspaceId ? { workspaceId: assertNonEmpty(input.workspaceId, 'workspaceId') } : {}),
+          ...(input.workspacePath ? { workspacePath: assertNonEmpty(input.workspacePath, 'workspacePath', 4096) } : {}),
+        }
+        state.services.push(result)
+      }
+      // Retirement is monotone. Even ensure delivered before any create must observe its tombstone.
+      if (retire && !result.archivedAt) {
+        result.archivedAt = iso(now)
+        for (const lease of state.leases) if (lease.serviceId === result.id && lease.desiredState === 'open') closeLeaseInState(state, lease, 'service_archived', now, this.ids)
+      }
+      if (!result.archivedAt) { result.name = name; result.evidence = input.evidence?.trim().slice(0, 2000) || undefined }
+      result.updatedAt = iso(now)
+    })
+    return structuredClone(result)
+  }
+
+  async saveForwardPreference(serviceId: string, deviceId: string, ttlMs: number): Promise<RegisteredService> {
+    assertTtl(ttlMs)
+    let result!: RegisteredService
+    await this.transact(state => {
+      result = requireService(state, serviceId)
+      if (result.archivedAt) throw new CompanionError('NOT_FOUND', 'Service is retired', 404)
+      const device = requireDevice(state, deviceId)
+      if (device.revokedAt) throw new CompanionError('DEVICE_REVOKED', 'Preferred Device is revoked', 403)
+      result.preferredDeviceId = device.id
+      result.preferredTtlMs = ttlMs
+      result.updatedAt = iso(this.clock.now())
     })
     return structuredClone(result)
   }
@@ -602,6 +664,14 @@ export class CompanionService {
   private emit(): void {
     for (const listener of this.listeners) listener()
   }
+}
+
+function validateManagedOwner(owner: ManagedServiceInput['owner']): ManagedServiceInput['owner'] {
+  if (owner?.provider !== 'dsh-dev-services') throw new CompanionError('VALIDATION_ERROR', 'Unsupported managed service provider')
+  return { provider: owner.provider, namespace: assertNonEmpty(owner.namespace, 'namespace'), id: assertNonEmpty(owner.id, 'managed service id') }
+}
+function sameManagedOwner(a: RegisteredService['managedOwner'], b: ManagedServiceInput['owner']): boolean {
+  return a?.provider === b.provider && a.namespace === b.namespace && a.id === b.id
 }
 
 function validateCapabilities(value: DeviceCapabilities): DeviceCapabilities {

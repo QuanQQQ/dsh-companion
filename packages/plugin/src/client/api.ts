@@ -1,3 +1,4 @@
+import type { CloseReason } from '../domain.js'
 export type Protocol = 'http' | 'https' | 'tcp'
 export type InstanceState = 'starting' | 'running' | 'recovering' | 'needs_attention' | 'closed'
 
@@ -21,6 +22,10 @@ export interface ServiceDto {
   name: string
   port: number
   protocol: Protocol
+  managedOwner?: { provider: string; namespace: string; id: string } | undefined
+  workspacePath?: string | undefined
+  preferredDeviceId?: string | undefined
+  preferredTtlMs?: number | undefined
   source: 'manual' | 'agent' | 'process'
   evidence?: string | undefined
   createdAt: string
@@ -41,7 +46,7 @@ export interface ForwardLeaseDto {
   updatedAt: string
   expiresAt: string
   closedAt?: string | undefined
-  closeReason?: string | undefined
+  closeReason?: CloseReason | undefined
 }
 
 export interface InstanceDto {
@@ -57,6 +62,8 @@ export interface InstanceDto {
   retryAt?: string | undefined
   errorCode?: string | undefined
   errorMessage?: string | undefined
+  sampledAt?: string | undefined
+  probeAgeMs?: number | undefined
   observedAt: string
 }
 
@@ -141,4 +148,25 @@ async function requestJson(url: string, init: RequestInit = {}): Promise<unknown
 function asRecord(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('服务返回内容无效')
   return value as Record<string, unknown>
+}
+
+export interface LinuxServiceDto {
+  id: string; name: string; port: number; protocol: Protocol; desired: 'stopped' | 'running' | 'removed'
+  workspaceId: string | null; workspacePath: string | null; legacyTaskId?: string
+  runtime: { state: string; exists?: boolean }; health: { state: string; reason?: string; warning?: string }
+  companion: { state: string; id?: string }; lastError?: string; removalComplete: boolean
+}
+export interface LocalSnapshotDto { linux: LinuxServiceDto[]; companion: CompanionSnapshotDto }
+export interface LaunchReviewDto {
+  serviceId: string; name: string; workspacePath: string | null; configurationDigest: string
+  executable: string; args: string[]; workdir: string; port: number; protocol: Protocol
+}
+export async function getLocalSnapshot(signal?: AbortSignal): Promise<LocalSnapshotDto> {
+  return asRecord(await requestJson('/api/local-services/snapshot', signal ? { signal } : {})).snapshot as LocalSnapshotDto
+}
+export async function getLaunchReview(id: string): Promise<LaunchReviewDto> {
+  return asRecord(await requestJson('/api/local-services/review?service_id=' + encodeURIComponent(id))).review as LaunchReviewDto
+}
+export async function localServiceAction(operation: string, body: Record<string, unknown>): Promise<unknown> {
+  return asRecord(await requestJson('/api/local-services/' + operation, jsonPost(body))).result
 }

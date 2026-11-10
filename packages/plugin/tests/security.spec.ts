@@ -1,3 +1,4 @@
+import { browserAuth } from './auth-fixture.js'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { mkdtemp, writeFile, rm } from 'node:fs/promises'
@@ -215,10 +216,10 @@ it('legacy RETRY_EXHAUSTED snapshots automatically receive a fresh fenced Open',
 for (const rejection of [401, 403] as const) it('management HTTP enforces Connection authentication rejection ' + rejection, async t => {
   const h = await setup()
   let checks = 0
-  const route = createCompanionHttpRoute(h.service, [], undefined, undefined, undefined, { requestRejection(request) {
+  const route = createCompanionHttpRoute(h.service, [], undefined, undefined, undefined, { ...browserAuth(), admit(request) {
     checks++
-    assert.equal(request.headers.cookie, undefined)
-    return rejection
+    assert.equal((request.headers as any).cookie, undefined)
+    return {rejection}
   } })
   const server = createServer((req, res) => void route.handler(req, res))
   server.listen(0, '127.0.0.1'); await once(server, 'listening')
@@ -248,7 +249,7 @@ it('missing Connection auth fails management closed but one-use pairing remains 
 
 it('global management is independent of Task existence while legacy paths stay compatible', async t => {
   const h = await setup()
-  const route = createCompanionHttpRoute(h.service, [], undefined, undefined, undefined, { requestRejection: () => undefined })
+  const route = createCompanionHttpRoute(h.service, [], undefined, undefined, undefined, browserAuth())
   const server = createServer((req, res) => void route.handler(req, res))
   server.listen(0, '127.0.0.1'); await once(server, 'listening')
   t.after(() => new Promise<void>(resolve => server.close(() => resolve())))
@@ -293,7 +294,7 @@ it('CLI download serves only the packaged local file with safe headers and missi
   const h = await setup()
   const directory = await mkdtemp(join(tmpdir(), 'companion-download-'))
   const file = join(directory, 'companion-cli.mjs')
-  const route = createCompanionHttpRoute(h.service, [], undefined, undefined, pathToFileURL(file), { requestRejection: () => undefined })
+  const route = createCompanionHttpRoute(h.service, [], undefined, undefined, pathToFileURL(file), browserAuth())
   const server = createServer((req, res) => void route.handler(req, res))
   server.listen(0, '127.0.0.1'); await once(server, 'listening')
   t.after(async () => { await new Promise<void>(resolve => server.close(() => resolve())); await rm(directory, { recursive: true, force: true }) })

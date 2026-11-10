@@ -10,12 +10,16 @@ Device 127.0.0.1:5173 → SSH → devbox 127.0.0.1:5173
 
 ## 交付与兼容边界
 
-- `packages/plugin`：`dsh-companion`，Host、Local Services 卡片和 Companion Devices 设置。只消费 Better Sidebar 的公开 `registerTab` 接口。
-- `packages/cli`：`dsh-companion-cli`，单文件 JS bundle（包含 ws），统一入口为 launch；保留 setup/install、update、daemon、status、restart、uninstall 兼容命令。
-- CLI 要求 macOS 和**外部安装的 Node.js 22+**。没有附带原生 Node 运行时，没有 codesign/notarization，不是无需运行时的独立 App。
-- Host 管理接口要求 DSH 的公开 `connection.requestRejection` 登录契约；已在 DSH 0.1.2-rc.1 隔离实例验证。缺失契约时返回 503，而不是降级为匿名管理。
-- 服务注册、查询和 Lease 生命周期属于当前 Host 的统一控制面，不依赖 Task Workspace、Agent cwd 或 Session。Better Sidebar 只是卡片容器；其公开 0.13.1 类型是固定开发依赖。
-- 自动化验证不能替代真实 Device 的 Apple SSH、Keychain、launchd、睡眠唤醒和断网验收；发布门禁见 [macOS 验收清单](docs/macos-acceptance.md)。
+本版面向 DSH **0.2.1-rc.5**，三个包使用 **0.2.0-rc.2**。
+
+- `packages/dev-services`：`dsh-dev-services`，按项目 Workspace 管理 Linux 应用，由独立 systemd user unit 监督，提供创建、启动、停止、重启、状态、日志、移除与同步工具。
+- `packages/plugin`：`dsh-companion`，原生 Local Services 右侧栏、Companion Devices 设置和设备转发控制面；与 dev-services 通过 Host capability 协作。
+- `packages/cli`：`dsh-companion-cli`，单文件 Device CLI（包含 ws），统一入口为 launch，兼容已有 setup/install、update、daemon、status、restart、uninstall 命令。
+- Linux 需要 Node.js 22.13+ 和可用的 systemd user manager；Device CLI 支持 macOS，使用外部安装的 Node.js 22+、系统 OpenSSH 和 Keychain。
+- Host 管理接口使用原生 Connection 的 owner-browser 身份；signed API Peer 不获得浏览器管理或执行审批权限。
+- 真实 Device 的 SSH、Keychain、launchd、睡眠唤醒和断网验收单独记录，见 [设备验收清单](docs/macos-acceptance.md)。
+
+构建后将 `dsh-companion` 与 `dsh-dev-services` 两个 tgz 通过 DSH 官方 plugin manager 安装到同一 profile。先核对运行时版本和 DSH_HOME，安装前备份配置与状态。CLI 已包含在 Companion 包中，设备使用设置页面生成的启动命令。
 
 ## Device 统一启动入口
 
@@ -46,22 +50,21 @@ Device 被拒绝认证时关闭自有 SSH，持久显示 needs_pairing，而非�
 
 ## Local Services
 
-在 Better Sidebar 的 New tab 菜单打开 **Local Services**。每个 Session 看到同一个 Host 全局列表。
+从原生右侧栏的添加菜单打开 **Local Services**，可查看各项目开发服务及其设备转发状态。
 
-- 注册服务只声明名称、端口和协议，**不授权转发**。同一 Host 端口只有一个活跃声明；再次注册该端口会刷新原声明，而不是创建 Task 副本。
-- 选择明确 Device，再创建 TTL-bound Forward Lease。默认和最长 TTL 都是一周（7 天）；AI 的 `ttl_minutes` 范围为 1–10080，省略时为 10080。已有 Lease 不因升级、重复打开、重新检查或重启而续期。
-- 到期或停止后可直接“重新开启转发”。操作创建新 Lease，并等待同一 Device、同一端口的旧 Lease 关闭 ACK；旧 generation、到期时间和 tombstone 均保留。
-- Preferred Device 只是 UI 默认选择，不授权、不迁移，也不故障转移。一个 Device 的本地端口全局独占；冲突不会换端口或终止未知进程。
-- 卡片展示 Desired/Observed、generation、Device WSS、SSH child、Listener ownership 和可选 Remote TCP probe。Listener 存在不等于应用健康。
-- 重启通过 close ACK → 新 generation open，保留 Lease ID 和原始到期时间。
-- Task、Session 结束或 Task 归档都不关闭 Lease。撤销 Device、注销服务或 TTL 到期会关闭对应授权。
-- WSS 失联会先关闭 Companion 自有 SSH。重连后 Host 根据全局 Desired State 下发新的 fenced Open，使仍有效的 Lease 自动恢复；不会自行创建、迁移或续期授权。
+- 创建保存可执行文件、字面值参数、固定端口和工作目录，不启动应用。Agent 的创建和变更受原始 Session cwd 与 sandbox Workspace root 的真实项目边界限制；独立启动要求当前 `danger-full-access` 策略。
+- 浏览器启动、重启和“启动并转发”先展示固定命令、目录和端口；owner 明确确认配置摘要后，由 Host 在该请求内授权执行。配置或登录状态变化会拒绝操作。此权限不会传给 Agent。
+- Linux 进程由独立 systemd unit 管理。加载器卸载、Agent 取消或 readiness 等待超时保留已启动的自有进程；停止和移除是显式操作。端口可连接表示已核对归属并主动建立 loopback TCP 连接，应用业务健康单独验证。
+- 服务列表显示项目路径。owner 可明确管理其他项目；Agent 的 managed 服务和转发变更必须通过真实调用 Workspace 检查。managed 应用使用 `dev_service_remove` 移除。
+- 首次转发明确选择 Device 和 TTL。默认与最长均为7天；已有有效 Lease 的重复打开、重新检查和重启保持原到期时间。保存的 Device 偏好不会触发自动切换或 failover。
+- 设备状态分别显示控制通道、同代 SSH、listener 和新鲜 TCP 探测证据。设备本地接受连接不能单独证明端到端应用可用；旧 CLI 缺少探测时显示需升级验证。
+- 停止意图与实际状态分开展示。仅可信 runtime 已不存在或 inactive 时显示已停止；未知或仍活跃显示停止待确认。关闭转发的期望状态与设备确认同样分开。
 
-AI 工具仍保留 `task_service_register`、`task_service_unregister`、`task_forward_open`、`task_forward_close`、`task_forward_list`、`task_forward_restart` 名称以兼容既有 Agent，但 `task_` 前缀不再表示 Task scope。工具不解析 Agent cwd，也不接受任意 SSH 命令、远端地址或参数。
+“端口转发”保留手工 loopback 端口声明及已有兼容工具。手工声明属于 Host 全局，注册本身不启动应用、不授予转发。`task_service_register`、`task_service_unregister`、`task_forward_open/close/list/restart` 名称保留兼容；managed 声明的变更额外受来源项目约束。
 
-Host 使用独立的 state schema v3，支持读取 v1 Task 状态、含 managedOwner 的 v2 Task 状态及 v2 全局状态。Task 声明按端口折叠为全局声明，保留最新活跃声明的名称、协议和托管来源信息，并关联既有 Lease。迁移前保存带原文件 SHA-256 的 .pre-v3 备份，校验通过后原子写回；设备身份与凭据保留。未知版本和非法状态不会被重置。Companion 初始化失败时，仅该插件停止提供转发能力，其 API 返回认证保护下的 503，Host 继续运行；修复状态后重启加载。管理入口为 `GET /api/companion/snapshot`、`POST /api/companion/services` 以及 `/api/companion/services/:serviceId/...`。`/tasks/:taskId/...` 路径仅供缓存客户端兼容，其中 `taskId` 不参与权限或数据筛选。
+Linux 配置保存在 `$DSH_HOME/dev-services/services.sqlite`。v1 迁移先验证并备份；旧 Task 归属保留为 unclaimed，由 owner 明确关联项目。Companion 的 `$DSH_HOME/companion/state.json` 保留独立配对与转发状态，读取合法旧版本前备份并验证；未知或损坏数据不重置。更换 DSH_HOME 创建独立 Host，不自动复制配对或 Lease。
 
-### 停止转发与注销服务
+### 手工端口声明的停止转发与注销服务
 
 - `task_forward_close({ lease_id })` / 卡片“停止转发”：仅撤销指定 Lease，服务声明和其他 Device 的 Lease 保留。重复请求不增加关闭代次。
 - `task_service_unregister({ service_id })` / 卡片“注销服务”：原子归档全局声明并关闭其所有 Device 的 Open Lease；保留关闭 tombstone、命令及观测。重复注销不创建新关闭代次。

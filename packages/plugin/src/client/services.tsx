@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { isForwardCloseConfirmed } from '../closure.js'
+import { forwardStatus } from '../forward-status.js'
 import { DEFAULT_LEASE_TTL_MS } from '../domain.js'
-import type { TabComponentProps } from 'dsh-better-sidebar/client/service'
+interface TabComponentProps { visible: boolean }
 import {
   getSnapshot, leaseAction, openLease, registerService, unregisterService,
   type CompanionSnapshotDto, type DeviceDto, type ForwardLeaseDto, type InstanceDto, type Protocol, type ServiceDto,
@@ -50,8 +51,7 @@ export function ServicesTab({ visible }: TabComponentProps) {
     if (devices.some(device => device.id === selectedDeviceId)) return
     const preferred = window.localStorage.getItem('dsh-companion.preferred-device')
     const selected = devices.find(device => device.id === preferred)
-      ?? devices.find(device => device.online)
-      ?? devices[0]
+
     setSelectedDeviceId(selected?.id ?? '')
   }, [devices, selectedDeviceId])
   const selectedDevice = devices.find(device => device.id === selectedDeviceId)
@@ -91,7 +91,7 @@ export function ServicesTab({ visible }: TabComponentProps) {
     <header className="dco-header">
       <div className="dco-title-row"><span className="dco-mark"><ServicesIcon /></span><div><span className="dco-eyebrow">HOST · LOOPBACK</span><h2>Local Services</h2></div></div>
       <p>此 Host 统一维护的 loopback 服务声明与 Device 转发控制面，不随 Task 或 Session 切换。</p>
-      <div className="dco-context"><span><small>服务范围</small><strong>当前 Host 全局</strong></span><label><small>目标 Device</small><select value={selectedDeviceId} onChange={event => setSelectedDeviceId(event.target.value)}>{devices.map(device => <option key={device.id} value={device.id}>{device.online ? '●' : '○'} {device.name}</option>)}</select></label></div>
+      <div className="dco-context"><span><small>服务范围</small><strong>当前 Host 全局</strong></span><label><small>目标 Device</small><select value={selectedDeviceId} onChange={event => setSelectedDeviceId(event.target.value)}><option value="">选择设备</option>{devices.map(device => <option key={device.id} value={device.id}>{device.online ? '●' : '○'} {device.name}</option>)}</select></label></div>
     </header>
 
     {snapshot && <>
@@ -143,7 +143,7 @@ function ServiceCard(props: {
     {otherOpen.length > 0 && <div className="dco-other">另有 {otherOpen.length} 台 Device 持有 Open Lease：{otherOpen.map(item => snapshot.devices.find(deviceItem => deviceItem.id === item.deviceId)?.name).filter(Boolean).join('、')}</div>}
     <details className="dco-diagnostics"><summary>诊断详情 <span>Desired / Observed · g{lease?.generation ?? '—'}</span></summary><div className="dco-diagnostic-body">
       <div className="dco-runtime"><Fact label="Lease 期望" value={lease?.desiredState.toUpperCase() ?? 'NONE'}/><Fact label="Instance 观测" value={instance?.state.toUpperCase() ?? 'ABSENT'}/><Fact label="Generation" value={lease ? `g${lease.generation}` : '—'}/><Fact label="端口策略" value={`127.0.0.1:${service.port} ↔ :${service.port}`}/></div>
-      <div className="dco-health"><Health label="Device WSS" value={device?.online ? 'connected' : 'offline'} good={Boolean(device?.online)}/><Health label="SSH child" value={instance?.sshChild ?? 'unknown'} good={instance?.sshChild === 'running'}/><Health label="Listener ownership" value={instance?.listener ?? 'unknown'} good={instance?.listener === 'owned'}/><Health label="Remote TCP probe" value={instance?.remoteProbe ?? 'unknown'} good={instance?.remoteProbe === 'healthy' || instance?.remoteProbe === 'disabled'}/></div>
+      <div className="dco-health"><Health label="Device WSS" value={device?.online ? 'connected' : 'offline'} good={Boolean(device?.online)}/><Health label="SSH child" value={instance?.sshChild ?? 'unknown'} good={instance?.sshChild === 'running'}/><Health label="Listener ownership" value={instance?.listener ?? 'unknown'} good={instance?.listener === 'owned'}/><Health label="设备本地 TCP 探测" value={instance?.remoteProbe ?? 'unknown'} good={instance?.remoteProbe === 'healthy'}/></div>
       <div className="dco-recovery"><strong>Recovery</strong><span>网络、控制通道和 SSH 瞬态失败会持续退避重试（最长 30 秒）；端口冲突、认证、Host Key、撤销和 TTL 到期不会自动绕过。</span>{instance?.retryAttempt !== undefined && <code>连续失败尝试 {instance.retryAttempt} · next {instance.retryAt ? relativeTime(instance.retryAt) : 'pending'}</code>}</div>
       {lease?.desiredState === 'open' && <button className="dco-button" disabled={busy === actionKey} onClick={() => void act(() => leaseAction(lease.id, 'restart'), 'Lease 已按 close/open 两代 fencing 重启；TTL 未延长。')}>手动重启 Instance</button>}
     </div></details>
@@ -184,16 +184,17 @@ function RetiredForwards({ snapshot, busy, runAction }: { snapshot: CompanionSna
 export function currentLease(snapshot: CompanionSnapshotDto, serviceId: string, deviceId: string): ForwardLeaseDto | undefined {
   return snapshot.leases.filter(item => item.serviceId === serviceId && item.deviceId === deviceId).at(-1)
 }
-function displayState(lease: ForwardLeaseDto | undefined, instance: InstanceDto | undefined, device: DeviceDto | undefined): 'running' | 'closed' | 'starting' | 'recovering' | 'needs_attention' | 'degraded' | 'unforwarded' | 'closing' {
+function displayState(lease: ForwardLeaseDto | undefined, instance: InstanceDto | undefined, device: DeviceDto | undefined): 'running' | 'closed' | 'starting' | 'recovering' | 'needs_attention' | 'degraded' | 'unforwarded' | 'closing' | 'probe_unsupported' {
   if (!lease) return 'unforwarded'
-  if (lease.desiredState === 'closed') return isForwardCloseConfirmed(lease, instance) ? 'closed' : 'closing'
-  if (instance?.state === 'needs_attention') return 'needs_attention'
-  if (!device?.online) return 'degraded'
-  if (!instance || instance.generation !== lease.generation) return 'starting'
-  return instance.state === 'closed' ? 'starting' : instance.state
+  const phase = forwardStatus(lease, device, instance).phase
+  if (phase === 'ready') return 'running'
+  if (phase === 'closed' || phase === 'closing' || phase === 'probe_unsupported') return phase
+  if (phase === 'device_offline') return 'degraded'
+  if (phase === 'forwarding_error') return 'needs_attention'
+  return instance?.state === 'recovering' ? 'recovering' : 'starting'
 }
 function StatePill({ state }: { state: ReturnType<typeof displayState> }) {
-  const copy = { running: '运行中', closed: '已确认停止', closing: '待确认停止', starting: '启动中', recovering: '自动恢复中', needs_attention: '需要处理', degraded: '设备离线', unforwarded: '未转发' }
+  const copy = { running: '本地连接已验证', probe_unsupported: '设备需升级验证', closed: '已确认停止', closing: '待确认停止', starting: '启动中', recovering: '自动恢复中', needs_attention: '需要处理', degraded: '设备离线', unforwarded: '未转发' }
   return <span className={`dco-pill dco-state-${state}`}><i />{copy[state]}</span>
 }
 function SourcePill({ source }: { source: ServiceDto['source'] }) {
@@ -219,7 +220,7 @@ function relativeTime(value: string): string {
   const seconds = Math.max(0, Math.ceil((Date.parse(value) - Date.now()) / 1_000))
   return `${seconds} 秒后`
 }
-function runningCount(snapshot: CompanionSnapshotDto, deviceId: string): number { return snapshot.instances.filter(item => item.deviceId === deviceId && item.state === 'running').length }
+function runningCount(snapshot: CompanionSnapshotDto, deviceId: string): number { return snapshot.services.filter(service => { const lease = currentLease(snapshot, service.id, deviceId); return lease && displayState(lease, snapshot.instances.find(item => item.leaseId === lease.id && item.generation === lease.generation), snapshot.devices.find(item => item.id === deviceId)) === 'running' }).length }
 function issueCount(snapshot: CompanionSnapshotDto, deviceId: string): number { return snapshot.instances.filter(item => item.deviceId === deviceId && (item.state === 'recovering' || item.state === 'needs_attention')).length }
 function openLocal(service: ServiceDto): void {
   if (service.protocol === 'tcp') { void navigator.clipboard?.writeText(`127.0.0.1:${service.port}`); return }

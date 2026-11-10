@@ -10,8 +10,11 @@ export function assertTrustedAuthority(entry: string): void {
   throw new Error(`dsh-companion: trusted host ${JSON.stringify(entry)} is not a bare host[:port] authority`)
 }
 
-/** Mirrors the DSH Host, Fetch-Metadata, and Origin checks for browser-facing routes. */
-export function isTrustedCompanionRequest(request: TrustFenceRequest, trustedHosts: readonly string[]): boolean {
+export type CompanionTrustFence = readonly string[] | ((request: TrustFenceRequest) => boolean)
+
+/** Host deployments delegate to Connection's carrier-aware trust contract; arrays support fixtures. */
+export function isTrustedCompanionRequest(request: TrustFenceRequest, trustedHosts: CompanionTrustFence): boolean {
+  if (typeof trustedHosts === 'function') return trustedHosts(request)
   const hostHeader = header(request.headers, 'host')
   if (!hostHeader) return false
   const host = parseAuthority(hostHeader)

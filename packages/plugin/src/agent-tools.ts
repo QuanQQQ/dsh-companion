@@ -1,6 +1,6 @@
 import type { PromptSection } from '@deepseek-ai/dsh-system-prompt'
-import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
-import { DEFAULT_LEASE_TTL_MS, MAX_LEASE_TTL_MS, MIN_LEASE_TTL_MS } from './domain.js'
+import { defineTool, type ToolDefinition, type ToolRunContext } from '@deepseek-ai/dsh-tools'
+import { CompanionError, DEFAULT_LEASE_TTL_MS, MAX_LEASE_TTL_MS, MIN_LEASE_TTL_MS, type RegisteredService } from './domain.js'
 import { isForwardCloseConfirmed } from './closure.js'
 import type { CompanionService } from './service.js'
 
@@ -11,7 +11,14 @@ export const COMPANION_GUIDANCE_SECTION: PromptSection = {
 }
 
 /** Tool names remain stable for compatibility; all operations target one Host-global registry. */
-export function createCompanionTools(service: CompanionService): ToolDefinition[] {
+export function createCompanionTools(service: CompanionService, authorizeManaged?: (record: RegisteredService, exec: ToolRunContext) => Promise<void>): ToolDefinition[] {
+  const checkManaged = async (serviceId: string | undefined, exec: ToolRunContext) => {
+    const record = service.snapshot().services.find(item => item.id === serviceId)
+    if (!record?.managedOwner) return
+    if (!authorizeManaged) throw new CompanionError('WORKSPACE_ACCESS_DENIED', 'Managed forwarding requires its project Workspace authority', 403)
+    await authorizeManaged(record, exec)
+  }
+  const leaseService = (leaseId: string) => service.snapshot().leases.find(item => item.id === leaseId)?.serviceId
   return [
     defineTool({
       name: 'task_service_register',
@@ -48,6 +55,9 @@ export function createCompanionTools(service: CompanionService): ToolDefinition[
         } },
       },
       async execute(args) {
+        if (service.snapshot().services.find(item => item.id === args.service_id)?.managedOwner) {
+          throw new CompanionError('WORKSPACE_ACCESS_DENIED', 'Remove managed development services through dev_service_remove', 403)
+        }
         const removed = await service.unregisterService(args.service_id)
         return { ...presentService(removed), archived_at: removed.archivedAt!,
           leases: service.list().leases.filter(lease => lease.serviceId === removed.id).map(presentLease) }
@@ -60,7 +70,7 @@ export function createCompanionTools(service: CompanionService): ToolDefinition[
         lease_id: { type: 'string', required: true, description: 'Forward Lease id from task_forward_list.' },
       },
       output: leaseOutput(),
-      async execute(args) { return presentLease(await service.closeLease(args.lease_id)) },
+      async execute(args, exec) { await checkManaged(leaseService(args.lease_id), exec); return presentLease(await service.closeLease(args.lease_id)) },
     }),
     defineTool({
       name: 'task_forward_open',
@@ -71,7 +81,8 @@ export function createCompanionTools(service: CompanionService): ToolDefinition[
         ttl_minutes: { type: 'integer', default: DEFAULT_LEASE_TTL_MS / 60_000, description: `Authorization lifetime from ${MIN_LEASE_TTL_MS / 60_000} to ${MAX_LEASE_TTL_MS / 60_000} minutes; defaults to ${DEFAULT_LEASE_TTL_MS / 60_000} (7 days). Existing Leases are not extended.` },
       },
       output: leaseOutput(),
-      async execute(args) {
+      async execute(args, exec) {
+        await checkManaged(args.service_id, exec)
         return presentLease(await service.openLease({
           serviceId: args.service_id,
           deviceId: args.device_id,
@@ -93,7 +104,7 @@ export function createCompanionTools(service: CompanionService): ToolDefinition[
         lease_id: { type: 'string', required: true, description: 'Forward Lease id returned by task_forward_list.' },
       },
       output: leaseOutput(),
-      async execute(args) { return presentLease(await service.restartLease(args.lease_id)) },
+      async execute(args, exec) { await checkManaged(leaseService(args.lease_id), exec); return presentLease(await service.restartLease(args.lease_id)) },
     }),
   ]
 }

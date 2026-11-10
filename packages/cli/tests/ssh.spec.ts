@@ -50,6 +50,7 @@ async function fixture(t: TestContext, options: SshExecutorOptions = {}) {
     listener: undefined as ((pid: number, port: number) => SshCommandResult) | undefined,
     closeMaster: true,
     makeSocket: true,
+    globalListener: undefined as SshCommandResult | undefined,
     configureChild: (_child: FakeChild) => {},
   }
   const spawn: SshSpawn = (file, args, settings) => {
@@ -85,6 +86,7 @@ async function fixture(t: TestContext, options: SshExecutorOptions = {}) {
       return ok('', 'Master running (pid=' + (value.child.pid + state.masterOffset) + ')\n')
     }
     if (file.endsWith('/lsof')) {
+      if (!args.includes('-p')) return state.globalListener ?? denied()
       const pid = Number(args[args.indexOf('-p') + 1])
       const value = [...sockets.values()].find(value => value.child.pid === pid)
       if (!value || value.child.exited) return denied()
@@ -228,6 +230,70 @@ test('ownership requires matching master PID and exactly one matching lsof loopb
   assert.equal(await f.executor.isOwned('lease'), true)
   await f.executor.stop('unknown-lease')
   assert.deepEqual(f.children[0]!.signals, [])
+})
+
+test('active TCP probe connects only the verified fixed loopback listener and detects failed reachability', async t => {
+  const f = await fixture(t)
+  let connections = 0
+  const server = createServer(socket => { connections++; socket.end() })
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  t.after(() => new Promise<void>(done => { if (server.listening) server.close(() => done()); else done() }))
+  const port = (server.address() as { port: number }).port
+  await f.executor.start('lease', port)
+  assert.equal(await f.executor.probe('lease'), 'healthy')
+  assert.equal(connections, 1)
+  f.state.masterOffset = 1
+  assert.equal(await f.executor.probe('lease'), 'unknown')
+  assert.equal(connections, 1, 'foreign reachable TCP alone is not ownership')
+  f.state.masterOffset = 0
+  await new Promise<void>(done => server.close(() => done()))
+  assert.equal(await f.executor.probe('lease'), 'failed')
+  assert.equal(f.children[0]!.exited, false, 'TCP failure does not stop the owned SSH master')
+})
+
+test('post-stop scan cannot call a reachable unlisted foreign TCP process missing', async t => {
+  const f = await fixture(t)
+  const server = createServer(socket => socket.end())
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  t.after(() => new Promise<void>(done => server.close(() => done())))
+  assert.equal(await f.executor.listenerState((server.address() as { port: number }).port), 'conflict')
+  assert.equal(server.listening, true)
+  assert.equal(f.children.length, 0, 'scan never adopts or signals the temporary foreign listener')
+})
+
+test('ownership lost during a successful connect is not reported healthy', async t => {
+  const f = await fixture(t)
+  const server = createServer(socket => { f.state.masterOffset = 1; socket.end() })
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  t.after(() => new Promise<void>(done => server.close(() => done())))
+  await f.executor.start('lease', (server.address() as { port: number }).port)
+  assert.equal(await f.executor.probe('lease'), 'unknown')
+})
+
+test('after stop explicit global listener scan distinguishes absent foreign and unverifiable ports without killing', async t => {
+  const f = await fixture(t)
+  const reservation = createServer()
+  reservation.listen(0, '127.0.0.1')
+  await once(reservation, 'listening')
+  const port = (reservation.address() as { port: number }).port
+  await new Promise<void>(done => reservation.close(() => done()))
+  await f.executor.start('lease', port)
+  await f.executor.stop('lease')
+  assert.equal(f.children[0]!.exited, true)
+  assert.equal(await f.executor.listenerState(port), 'missing')
+  f.state.globalListener = ok('p99999\nn127.0.0.1:' + port + '\n')
+  assert.equal(await f.executor.listenerState(port), 'conflict')
+  f.state.globalListener = ok('p99999\nn*:' + port + '\n')
+  assert.equal(await f.executor.listenerState(port), 'conflict')
+  for (const result of [ok(''), ok('p99999\nn127.0.0.1:9999\n'), { code: 1, stdout: '', stderr: 'denied' }]) {
+    f.state.globalListener = result
+    assert.equal(await f.executor.listenerState(port), 'unknown')
+  }
+  assert.deepEqual(f.children[0]!.signals, ['SIGTERM'], 'foreign PID never signalled')
+  assert.ok(f.calls.some(call => call.args.includes('-iTCP:' + port) && !call.args.includes('-p')))
 })
 
 test('startup ownership mismatch times out and kills only its created child', async t => {

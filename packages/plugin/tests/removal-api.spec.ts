@@ -1,3 +1,4 @@
+import { browserAuth } from './auth-fixture.js'
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { createServer } from 'node:http'
@@ -44,9 +45,7 @@ test('AI compatibility tools operate on one Host-global registry from any cwd', 
 
 test('global unregister HTTP requires authenticated same-origin JSON and keeps legacy Task path compatible', async t => {
   const { service, app, lease } = await setup()
-  const route = createCompanionHttpRoute(service, [], undefined, undefined, undefined, {
-    requestRejection: req => req.headers.cookie === 'admin=yes' ? undefined : 401,
-  })
+  const route = createCompanionHttpRoute(service, [], undefined, undefined, undefined, browserAuth(req => req.headers.cookie === 'admin=yes'))
   const server = createServer((req, res) => { void route.handler(req, res) })
   server.listen(0, '127.0.0.1'); await once(server, 'listening')
   t.after(async () => { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())) })

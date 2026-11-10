@@ -31,7 +31,7 @@ export default [
     outDir: 'lib',
     clean: false,
     dts: false,
-    deps: { neverBundle: [/@deepseek-ai\/dsh-client-/, 'react', 'react/jsx-runtime'] },
+    deps: { neverBundle: [/@deepseek-ai\//, 'react', 'react/jsx-runtime'] },
     outputOptions: {
       entryFileNames: 'index.js',
       banner: 'window.__ModuleLoader__.load({ id: "dsh-companion", factory: (require) => { var module = { exports: {} }; var exports = module.exports;',

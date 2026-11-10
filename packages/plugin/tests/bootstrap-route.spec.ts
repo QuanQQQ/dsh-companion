@@ -1,3 +1,4 @@
+import { browserAuth } from './auth-fixture.js'
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createServer } from 'node:http'
@@ -16,9 +17,7 @@ test('public launch code cannot approve devices or expose private device lists',
   const root = await mkdtemp(join(tmpdir(), 'companion-bootstrap-api-'))
   const bundle = 'export const VERSION = "0.1.4";\n'
   const path = join(root,'cli.mjs'); await writeFile(path,bundle)
-  const route = createCompanionHttpRoute(service, [], undefined, undefined, pathToFileURL(path), {
-    requestRejection: req => req.headers.cookie === 'admin=yes' ? undefined : 401,
-  })
+  const route = createCompanionHttpRoute(service, [], undefined, undefined, pathToFileURL(path), browserAuth(req => req.headers.cookie === 'admin=yes'))
   const server = createServer((req,res)=>void route.handler(req,res)); server.listen(0,'127.0.0.1'); await once(server,'listening')
   t.after(async()=>{server.closeAllConnections(); await new Promise<void>(resolve=>server.close(()=>resolve())); await rm(root,{recursive:true,force:true})})
   const base = 'http://127.0.0.1:'+(server.address() as {port:number}).port+'/api/companion'

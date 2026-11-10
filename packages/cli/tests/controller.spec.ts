@@ -10,6 +10,9 @@ import type { ForwardOpen, ForwardClose } from '../src/wire.js'
 class FakeSsh implements TunnelExecutor {
   owned = new Set<string>()
   starts = 0
+  probes = 0
+  probeResult: 'healthy' | 'failed' | 'unknown' = 'healthy'
+  listenerResult: 'missing' | 'conflict' | 'unknown' = 'missing'
   code = ''
   async start(id: string) {
     this.starts++
@@ -20,6 +23,8 @@ class FakeSsh implements TunnelExecutor {
   async stop(id: string) { this.owned.delete(id) }
   async stopAll() { this.owned.clear() }
   async isOwned(id: string) { return this.owned.has(id) }
+  async probe() { this.probes++; return this.probeResult }
+  async listenerState() { return this.listenerResult }
 }
 async function fixture(t: { after(fn: () => Promise<void>): void }) {
   const dir = await mkdtemp(join(tmpdir(), 'companion-controller-'))
@@ -137,6 +142,148 @@ it('disconnect during asynchronous ownership checks cannot spawn a new child', a
   await applying
   await stopping
   assert.equal(f.ssh.starts, 0)
+})
+
+it('tick refreshes actual owned TCP samples; cached lists only age evidence with monotonic time', async t => {
+  const f = await fixture(t)
+  await f.controller.execute(f.command)
+  const first = f.controller.observations()[0]!
+  assert.equal(first.remoteProbe, 'healthy')
+  assert.equal(first.probeAgeMs, 0)
+  assert.equal(f.ssh.probes, 1)
+  f.rewind(31_000)
+  const cached = f.controller.observations()[0]!
+  assert.equal(cached.sampledAt, first.sampledAt)
+  assert.equal(cached.probeAgeMs, 31_000)
+  assert.equal(f.ssh.probes, 1, 'list serialization cannot refresh a sample')
+  await f.controller.tick()
+  assert.equal(f.ssh.probes, 2)
+  assert.equal(f.controller.observations()[0]!.probeAgeMs, 0)
+  assert.notEqual(f.controller.observations()[0]!.sampledAt, first.sampledAt)
+})
+
+it('an upgraded daemon cannot authenticate persisted old healthy as a new sample', async t => {
+  const f = await fixture(t)
+  await f.controller.execute(f.command)
+  await f.store.patch('lease', { sampledAt: '2026-09-07T00:00:00.000Z', probeAgeMs: 0 })
+  const restarted = new ForwardController(f.store, f.ssh)
+  restarted.connect(f.hello)
+  assert.equal(restarted.observations()[0]?.remoteProbe, 'unknown')
+  assert.equal(restarted.observations()[0]?.sampledAt, undefined)
+  assert.equal(restarted.observations()[0]?.probeAgeMs, undefined)
+})
+
+it('disconnect during in-flight probe or persistence cannot restore healthy into a new session', async t => {
+  for (const phase of ['probe', 'persist']) {
+    const f = await fixture(t)
+    await f.controller.execute(f.command)
+    let entered!: () => void, release!: () => void
+    const waiting = new Promise<void>(done => { entered = done })
+    const gate = new Promise<void>(done => { release = done })
+    if (phase === 'probe') f.ssh.probe = async () => { entered(); await gate; return 'healthy' }
+    else {
+      const patch = f.store.patch.bind(f.store)
+      f.store.patch = async (id, value) => {
+        if (value.remoteProbe === 'healthy') { entered(); await gate }
+        return patch(id, value)
+      }
+    }
+    const ticking = f.controller.tick()
+    await waiting
+    const disconnected = f.controller.disconnect()
+    assert.equal(f.controller.observations()[0]?.remoteProbe, 'unknown', phase)
+    release()
+    await ticking
+    await disconnected
+    f.controller.connect({ ...f.hello, sessionEpoch: 'next' })
+    assert.equal(f.controller.observations()[0]?.remoteProbe, 'unknown', phase)
+    assert.equal(f.controller.observations()[0]?.probeAgeMs, undefined, phase)
+  }
+})
+
+it('failed TCP probe preserves owned SSH and clears old healthy on the next tick', async t => {
+  const f = await fixture(t)
+  await f.controller.execute(f.command)
+  f.ssh.probeResult = 'failed'
+  f.advance(1000)
+  await f.controller.tick()
+  const observed = f.controller.observations()[0]!
+  assert.equal(observed.remoteProbe, 'failed')
+  assert.equal(observed.listener, 'owned')
+  assert.equal(observed.sshChild, 'running')
+  assert.equal(observed.state, 'running')
+  assert.equal(f.ssh.owned.has('lease'), true)
+  assert.equal(f.ssh.starts, 1)
+})
+
+it('legacy executor without probe reports disabled with no actual sample', async t => {
+  const f = await fixture(t)
+  const legacy: TunnelExecutor = { start: f.ssh.start.bind(f.ssh), stop: f.ssh.stop.bind(f.ssh),
+    stopAll: f.ssh.stopAll.bind(f.ssh), isOwned: f.ssh.isOwned.bind(f.ssh) }
+  const controller = new ForwardController(f.store, legacy)
+  controller.connect(f.hello)
+  await controller.execute({ ...f.command, expiresAt: '2099-01-01T00:00:00.000Z' })
+  assert.equal(controller.observations()[0]!.remoteProbe, 'disabled')
+  assert.equal(controller.observations()[0]!.probeAgeMs, undefined)
+})
+
+it('disconnect invalidates healthy immediately even if stop fails, and persists unknown', async t => {
+  const f = await fixture(t)
+  await f.controller.execute(f.command)
+  f.ssh.stopAll = async () => { throw new Error('SSH_STOP_TIMEOUT') }
+  const disconnected = f.controller.disconnect()
+  assert.equal(f.controller.observations()[0]!.remoteProbe, 'unknown')
+  assert.equal(f.controller.observations()[0]!.probeAgeMs, undefined)
+  await assert.rejects(disconnected, /SSH_STOP_TIMEOUT/)
+  assert.equal(f.store.observations()[0]!.remoteProbe, 'unknown')
+  assert.equal(f.store.observations()[0]!.sshChild, 'unknown')
+})
+
+it('close only reports missing after listener scan; foreign residual and absent port stay unconfirmed', async t => {
+  for (const listener of ['missing', 'conflict', 'unknown'] as const) {
+    const f = await fixture(t)
+    await f.controller.execute(f.command)
+    f.ssh.listenerResult = listener
+    const result = await f.controller.execute({ v: 1, type: 'forward.close', authorityEpoch: 'authority', sessionEpoch: 'session',
+      leaseId: 'lease', operationId: 'close', digest: 'b'.repeat(64), generation: 2, reason: 'user' })
+    assert.equal(result.observation?.state, 'closed')
+    assert.equal(result.observation?.sshChild, 'exited')
+    assert.equal(result.observation?.listener, listener)
+    assert.equal(result.observation?.remoteProbe, 'unknown')
+    assert.equal(result.observation?.probeAgeMs, listener === 'unknown' ? undefined : 0)
+    assert.equal(f.ssh.owned.size, 0)
+  }
+  const f = await fixture(t)
+  const result = await f.controller.execute({ v: 1, type: 'forward.close', authorityEpoch: 'authority', sessionEpoch: 'session',
+    leaseId: 'unknown', operationId: 'close', digest: 'b'.repeat(64), generation: 2, reason: 'user' })
+  assert.equal(result.observation?.listener, 'unknown', 'placeholder port is not listener evidence')
+})
+
+it('closed tick rechecks the listener instead of fresh-stamping cached missing evidence', async t => {
+  const f = await fixture(t)
+  await f.controller.execute(f.command)
+  await f.controller.execute({ v: 1, type: 'forward.close', authorityEpoch: 'authority', sessionEpoch: 'session',
+    leaseId: 'lease', operationId: 'close', digest: 'b'.repeat(64), generation: 2, reason: 'user' })
+  const first = f.controller.observations()[0]!
+  f.advance(31_000)
+  assert.equal(f.controller.observations()[0]?.sampledAt, first.sampledAt)
+  assert.equal(f.controller.observations()[0]?.probeAgeMs, 31_000)
+  f.ssh.listenerResult = 'conflict'
+  await f.controller.tick()
+  assert.equal(f.controller.observations()[0]?.listener, 'conflict')
+  assert.notEqual(f.controller.observations()[0]?.sampledAt, first.sampledAt)
+  assert.equal(f.controller.observations()[0]?.probeAgeMs, 0)
+})
+
+it('close waits for verified stop and never acknowledges an unexited SSH child as closed/missing', async t => {
+  const f = await fixture(t)
+  await f.controller.execute(f.command)
+  f.ssh.stop = async () => { throw new Error('SSH_STOP_TIMEOUT') }
+  await assert.rejects(f.controller.execute({ v: 1, type: 'forward.close', authorityEpoch: 'authority', sessionEpoch: 'session',
+    leaseId: 'lease', operationId: 'close', digest: 'b'.repeat(64), generation: 2, reason: 'user' }), /SSH_STOP_TIMEOUT/)
+  assert.equal(f.controller.observations()[0]?.sshChild, 'unknown')
+  assert.equal(f.controller.observations()[0]?.listener, 'unknown')
+  assert.equal(f.controller.observations()[0]?.probeAgeMs, undefined)
 })
 
 it('TTL cancellation is independent of another Lease slow SSH startup', async t => {

@@ -58,6 +58,10 @@ export interface WireInstanceObservation {
   sshChild: 'unknown' | 'running' | 'exited'
   listener: 'unknown' | 'owned' | 'missing' | 'conflict'
   remoteProbe: 'unknown' | 'healthy' | 'failed' | 'disabled'
+  /** Actual Device sample time; absent on older protocol-v1 CLIs. */
+  sampledAt?: string | undefined
+  /** Monotonic age at serialization, independent of Device wall-clock changes. */
+  probeAgeMs?: number | undefined
   processId?: number | undefined
   retryAttempt?: number | undefined
   retryAt?: string | undefined
@@ -254,13 +258,16 @@ function parseObservation(value: unknown): WireInstanceObservation {
   const record = requireRecord(value, 'observation')
   exactKeys(record, [
     'leaseId', 'generation', 'state', 'sshChild', 'listener', 'remoteProbe', 'processId',
-    'retryAttempt', 'retryAt', 'errorCode', 'errorMessage',
+    'retryAttempt', 'retryAt', 'errorCode', 'errorMessage', 'sampledAt', 'probeAgeMs',
   ], true)
   const generation = requirePositiveInteger(record.generation, 'generation')
   const state = oneOf(record.state, 'state', ['starting', 'running', 'recovering', 'needs_attention', 'closed'] as const)
   const sshChild = oneOf(record.sshChild, 'sshChild', ['unknown', 'running', 'exited'] as const)
   const listener = oneOf(record.listener, 'listener', ['unknown', 'owned', 'missing', 'conflict'] as const)
   const remoteProbe = oneOf(record.remoteProbe, 'remoteProbe', ['unknown', 'healthy', 'failed', 'disabled'] as const)
+  const sampledAt = optionalString(record.sampledAt, 'sampledAt', 64)
+  if (sampledAt) assertIsoTime(sampledAt, 'sampledAt')
+  const probeAgeMs = optionalNonNegativeInteger(record.probeAgeMs, 'probeAgeMs')
   const processId = optionalPositiveInteger(record.processId, 'processId')
   const retryAttempt = optionalNonNegativeInteger(record.retryAttempt, 'retryAttempt')
   const retryAt = optionalString(record.retryAt, 'retryAt')
@@ -274,6 +281,8 @@ function parseObservation(value: unknown): WireInstanceObservation {
     sshChild,
     listener,
     remoteProbe,
+    ...(sampledAt === undefined ? {} : { sampledAt: new Date(sampledAt).toISOString() }),
+    ...(probeAgeMs === undefined ? {} : { probeAgeMs }),
     ...(processId === undefined ? {} : { processId }),
     ...(retryAttempt === undefined ? {} : { retryAttempt }),
     ...(retryAt ? { retryAt } : {}),

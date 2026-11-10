@@ -65,6 +65,7 @@ for (const transport of ['ProxyCommand','ProxyJump']) test('native OpenSSH honor
   // This local fixture proves real listener creation/ownership, not same-host recursive payload forwarding.
   const opened=await executor.start('native-lease',forwardPort)
   assert.equal(await executor.isOwned('native-lease'),true)
+  assert.equal(await executor.probe('native-lease'),'healthy','real local SSH listener accepts an active TCP connect')
   if(transport==='ProxyCommand') assert.ok(await readFile(marker,'utf8'))
   assert.ok(!calls.some(c=>c.args.includes('-G')))
   assert.equal(await readFile(config,'utf8'),configText)
@@ -78,6 +79,7 @@ for (const transport of ['ProxyCommand','ProxyJump']) test('native OpenSSH honor
   const descendants=transport==='ProxyCommand' ? [Number(await readFile(marker,'utf8')),Number(await readFile(childPid,'utf8'))] : (await exec('/bin/ps',['--ppid',String(opened.pid),'-o','pid='])).stdout.trim().split(/\s+/).map(Number)
   assert.ok(descendants.length>0 && descendants.every(pid=>pid>1))
   await executor.stop('native-lease')
+  assert.equal(await executor.listenerState(forwardPort),'missing','stop requires explicit listener absence after master exit')
   for(const pid of descendants) {
     let running=true
     for(let i=0;i<50;i++) {
@@ -90,6 +92,7 @@ for (const transport of ['ProxyCommand','ProxyJump']) test('native OpenSSH honor
   }
   const occupied=createServer()
   occupied.listen(forwardPort,'127.0.0.1');await once(occupied,'listening')
+  assert.equal(await executor.listenerState(forwardPort),'conflict','temporary foreign listener is not claimed missing or killed')
   t.after(()=>new Promise<void>(r=>occupied.close(()=>r())))
   await assert.rejects(executor.start('conflicting-lease',forwardPort),{code:'SSH_PORT_IN_USE'})
   assert.equal(await executor.isOwned('conflicting-lease'),false)

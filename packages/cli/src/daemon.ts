@@ -18,8 +18,9 @@ export async function runDaemon(): Promise<void> {
   try {
     const store = await RuntimeStore.open(paths.runtimeState, config.authorityEpoch)
     const statusFile = join(paths.root, 'daemon-status.json')
-    await runControlChannel({ config, controller: new ForwardController(store, ssh),
-      previous: await readConnectionState(statusFile, config.deviceId), observations: () => store.observations(),
+    const controller = new ForwardController(store, ssh)
+    await runControlChannel({ config, controller,
+      previous: await readConnectionState(statusFile, config.deviceId), observations: () => controller.observations(),
       readToken: () => new MacKeychain().read(config.deviceId),
       writeStatus: value => atomicPrivateWrite(statusFile, JSON.stringify(value) + '\n'),
     })
