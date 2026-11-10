@@ -47,8 +47,13 @@ export interface PairingTicket {
 }
 
 export interface RegisteredService {
-  /** Preserved ownership metadata from task-scoped managed services. */
+  /** Declaration provider identity; preserved across retirement to fence delayed ensure. */
   managedOwner?: { provider: string; namespace: string; id: string } | undefined
+  workspaceId?: string | undefined
+  workspacePath?: string | undefined
+  /** Explicitly saved launch selection; never an implicit fallback to another Device. */
+  preferredDeviceId?: string | undefined
+  preferredTtlMs?: number | undefined
   id: string
   name: string
   port: number
@@ -112,6 +117,10 @@ export interface ForwardInstanceObservation {
   sshChild: ProcessState
   listener: ListenerState
   remoteProbe: ProbeState
+  /** Actual Device sample timestamp; never substituted with Host receive time. */
+  sampledAt?: string | undefined
+  /** Device monotonic elapsed age when serialized; Host adds time since observedAt. */
+  probeAgeMs?: number | undefined
   processId?: number | undefined
   retryAttempt?: number | undefined
   retryAt?: string | undefined
@@ -158,6 +167,7 @@ export type CompanionErrorCode =
   | 'LEASE_CLOSED'
   | 'GENERATION_MISMATCH'
   | 'UNAUTHORIZED'
+  | 'WORKSPACE_ACCESS_DENIED'
   | 'LOCAL_PORT_IN_USE'
 
 export class CompanionError extends Error {

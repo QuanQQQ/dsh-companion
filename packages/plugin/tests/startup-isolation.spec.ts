@@ -1,3 +1,4 @@
+import { browserAuth } from './auth-fixture.js'
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises'
@@ -21,9 +22,10 @@ test('invalid state isolates Companion without resetting data or stopping Host H
   const address=server.address();assert.ok(address&&typeof address!=='string')
   const authority=`127.0.0.1:${address.port}`
   const ctx: HostContext={
-    connection:{requestRejection:req=>req.headers.authorization==='Bearer test'?undefined:401},
+    provide:()=>assert.fail('No operational services on invalid state'),
+    connection:browserAuth(req=>req.headers.authorization==='Bearer test'),
     webServer:{port:address.port,register:value=>{route=value;return()=>{}},registerUpgrade:()=>assert.fail('No device socket on invalid state')},
-    webRuntime:{trustedHosts:[authority]},systemPrompt:{section:()=>assert.fail('No operational guidance')},
+    systemPrompt:{section:()=>assert.fail('No operational guidance')},
     tools:{register:()=>assert.fail('No operational tools')},effect:callback=>callback(),
   }
   for(const raw of ['{broken','{"version":999}','{"version":2}']){

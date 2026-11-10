@@ -1,15 +1,11 @@
-# dsh-companion
+# DSH Companion 原生集成
 
-Host/Web plugin for Host-global localhost forwarding to paired macOS Devices. Better Sidebar integration uses its public `registerTab` API; no sidebar source patch is required.
+版本0.2.0-rc.2，运行时DSH0.2.1-rc.5。此包提供原生Local Services右侧栏、Companion Devices设置、设备配对与同端口转发；与dsh-dev-services包配合管理Linux应用。
 
-UI: Better Sidebar → New tab → Local Services; global Settings → Companion Devices. One active Service declaration exists per Host port and is visible from every Session. Registration does not grant forwarding. Select a Device and TTL explicitly to create a Lease. Task or Session lifecycle changes do not close a Lease. Restart preserves expiry and waits for close acknowledgment before a new generation opens.
+管理HTTP接口只接受原生owner-browser身份；signed API Peer保持Agent权限。浏览器启动先读取owner-only固定配置review，用户确认digest后，Host在同一次请求中授予不可序列化的配置绑定proof，启动前重新校验。Agent的Linux与managed转发操作遵守真实Workspace和sandboxPolicy边界。
 
-Requires the DSH Connection `requestRejection` authentication contract (validated in isolated DSH 0.1.2-rc.1), but does not require Task Workspace. Management, enrollment list/approve/deny and the legacy download route require browser authentication. Public bootstrap code and authority identity contain no credentials; public enrollment requests cannot grant trust until a logged-in human approves. Polling is protected by a random one-time delivery capability. Device verification and WSS require Device Bearer credentials. Missing management authentication capability fails closed.
+Companion capability仅负责managed声明ensure/retire，不替代设备选择或TTL授权。设备WebSocket使用独立配对凭据。不同DSH_HOME是独立Host，原有配对数据不自动迁移。
 
-State schema v3 accepts v1 Task state, v2 Task state with managed ownership, and v2 global state. Migration collapses Task declarations by port, preserves canonical managed ownership and Device credentials, remaps Leases, saves an exact SHA-256-named .pre-v3 backup, and atomically writes validated v3 state. Unknown versions and invalid state are never reset. Initialization failures isolate Companion: authenticated API calls return 503 while the Host continues running; repair state and restart to retry. Global HTTP routes live under `/api/companion/snapshot` and `/api/companion/services`; old `/tasks/:taskId/...` routes remain cached-client compatibility aliases and do not scope data. AI tool names retain their `task_` prefix for compatibility only.
+CLI包含在lib/companion-cli.mjs。设备从Companion Devices页面复制统一启动命令，在自己的设备上执行并核对授权码。需要外部Node.js22+与macOS。
 
-The Host continuously retransmits unacknowledged idempotent operations while their Lease remains valid. A new Device Connection Session reporting `starting` or `recovering` receives a fresh fenced Open command because Device session-local enablement is empty after disconnect. Permanent authentication, Host Key, port, policy, revocation and expiry failures remain manual.
-
-The matching CLI is bundled at `lib/companion-cli.mjs`. Settings generates one curl-to-bash command using `/api/companion/bootstrap.sh`; the script verifies the SHA-256 of `/api/companion/bootstrap/cli.mjs` before invoking unified launch. No manual CLI download is required. Pairing persists under `DSH_HOME/companion/state.json`; different test Homes remain separate authorities. CLI requires external Node.js 22+ and macOS; it is not a signed native application. Complete Mac acceptance before production rollout.
-
-Stable DSH changes must use the PDM stable-update queue and idle gate, never direct profile mutation or Host restart.
+完整操作、状态和恢复说明见仓库README及docs/。工程和隔离浏览器验收不代替真实Device端到端验收。升级运行实例时按部署流程备份配置与状态，使用官方plugin manager安装。

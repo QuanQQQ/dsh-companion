@@ -79,7 +79,7 @@ export function normalizeState(value: unknown): CompanionState {
     devices: { id: text, installationIdHash: hash, tokenHash: hash, name: text, platform: oneOf('macos'), osVersion: text, architecture: text, companionVersion: text,
       capabilities: value => { const r = object(value, 'capabilities'); fields(r, ['protocolVersion', 'localForward', 'tcpProbe']); if (r.protocolVersion !== 1 || r.localForward !== true || typeof r.tcpProbe !== 'boolean') invalid() },
       createdAt: date, updatedAt: date, lastSeenAt: optional(date), revokedAt: optional(date) },
-    services: { managedOwner: optional(value => { const owner = object(value, 'managedOwner'); fields(owner, ['provider', 'namespace', 'id']); text(owner.provider); text(owner.namespace); text(owner.id) }), id: text, name: text, port, protocol, source: oneOf('manual', 'agent', 'process'), evidence: optional(longText), createdAt: date, updatedAt: date, archivedAt: optional(date) },
+    services: { workspaceId: optional(text), workspacePath: optional(value => { if (typeof value !== 'string' || !value.startsWith('/') || value.length > 4096) invalid() }), preferredDeviceId: optional(text), preferredTtlMs: optional(value => integer(value, 60000, 604800000)), managedOwner: optional(value => { const owner = object(value, 'managedOwner'); fields(owner, ['provider', 'namespace', 'id']); text(owner.provider); text(owner.namespace); text(owner.id) }), id: text, name: text, port, protocol, source: oneOf('manual', 'agent', 'process'), evidence: optional(longText), createdAt: date, updatedAt: date, archivedAt: optional(date) },
     leases: { id: text, serviceId: text, deviceId: text, localHost: oneOf('127.0.0.1'), remoteHost: oneOf('127.0.0.1'), localPort: port, remotePort: port,
       desiredState: oneOf('open', 'closed'), generation, createdAt: date, updatedAt: date, expiresAt: date, closedAt: optional(date), closeReason: optional(closeReason) },
     tombstones: { leaseId: text, deviceId: text, generation, reason: oneOf(...closeReasons, 'orphaned'), createdAt: date, updatedAt: date },
@@ -87,7 +87,8 @@ export function normalizeState(value: unknown): CompanionState {
       attemptCount: optional(value => integer(value, 0)), lastSentAt: optional(date), protocol: optional(protocol) },
     instances: { leaseId: text, deviceId: text, generation, state: oneOf('starting', 'running', 'recovering', 'needs_attention', 'closed'), sshChild: oneOf('unknown', 'running', 'exited'),
       listener: oneOf('unknown', 'owned', 'missing', 'conflict'), remoteProbe: oneOf('unknown', 'healthy', 'failed', 'disabled'), processId: optional(value => integer(value, 1)), retryAttempt: optional(value => integer(value, 0)),
-      retryAt: optional(date), errorCode: optional(text), errorMessage: optional(longText), observedAt: date },
+      retryAt: optional(date), errorCode: optional(text), errorMessage: optional(longText), observedAt: date,
+      sampledAt: optional(date), probeAgeMs: optional(value => integer(value, 0)) },
   }
   for (const [key, schema] of Object.entries(schemas)) {
     const rows = record[key]
@@ -109,7 +110,15 @@ export function normalizeState(value: unknown): CompanionState {
   const tokenHashes = new Set<string>()
   for (const device of state.devices) { if (tokenHashes.has(device.tokenHash)) invalid(); tokenHashes.add(device.tokenHash) }
   const activePorts = new Set<number>()
+  const managedOwners = new Set<string>()
   for (const service of state.services) {
+    if ((service.workspaceId && !service.workspacePath) || !!service.preferredDeviceId !== !!service.preferredTtlMs) invalid()
+    if (service.preferredDeviceId && !devices.has(service.preferredDeviceId)) invalid()
+    if (service.managedOwner) {
+      const owner = JSON.stringify([service.managedOwner.provider, service.managedOwner.namespace, service.managedOwner.id])
+      if (managedOwners.has(owner)) invalid()
+      managedOwners.add(owner)
+    }
     if (!service.archivedAt) {
       if (activePorts.has(service.port)) invalid()
       activePorts.add(service.port)

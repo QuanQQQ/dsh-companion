@@ -7,6 +7,8 @@ export const RUNTIME_STATE_VERSION = 1 as const
 export interface RuntimeInstance extends InstanceObservation {
   desiredState: 'open' | 'closed'
   port: number
+  /** False only for close tombstones received before any trusted open port. */
+  portKnown?: boolean | undefined
   protocol: Protocol
   expiresAt: string
   controlPath: string
@@ -46,7 +48,7 @@ export class RuntimeStore {
 
   snapshot(): RuntimeState { return structuredClone(this.state) }
   observations(): InstanceObservation[] {
-    return this.state.instances.map(({ desiredState: _desired, port: _port, protocol: _protocol,
+    return this.state.instances.map(({ desiredState: _desired, port: _port, portKnown: _portKnown, protocol: _protocol,
       expiresAt: _expires, controlPath: _control, ...observation }) => structuredClone(observation))
   }
 
@@ -141,11 +143,16 @@ function parseRuntimeState(value: unknown): RuntimeState {
     positive(item.generation)
     positive(item.port)
     if ((item.port as number) > 65_535) throw new Error('invalid port')
+    if (item.portKnown !== undefined && typeof item.portKnown !== 'boolean') throw new Error('invalid port evidence')
+    // Released CLIs used port 1 as a placeholder for close-before-open tombstones.
+    if (item.desiredState === 'closed' && item.port === 1 && item.portKnown === undefined) item.portKnown = false
     if (!['open', 'closed'].includes(String(item.desiredState)) || !['http', 'https', 'tcp'].includes(String(item.protocol))) throw new Error('invalid Desired State')
     if (!['starting','running','recovering','needs_attention','closed'].includes(String(item.state))) throw new Error('invalid Instance state')
     if (typeof item.expiresAt !== 'string' || !Number.isFinite(Date.parse(item.expiresAt)) || typeof item.controlPath !== 'string') throw new Error('invalid Lease deadline or control path')
     if (item.retryAttempt !== undefined && (!Number.isSafeInteger(item.retryAttempt) || (item.retryAttempt as number) < 0)) throw new Error('invalid retry count')
     if (item.processId !== undefined) positive(item.processId)
+    if (item.sampledAt !== undefined && (typeof item.sampledAt !== 'string' || !Number.isFinite(Date.parse(item.sampledAt)))) throw new Error('invalid sample time')
+    if (item.probeAgeMs !== undefined && (!Number.isSafeInteger(item.probeAgeMs) || (item.probeAgeMs as number) < 0)) throw new Error('invalid probe age')
     if (!['unknown','running','exited'].includes(String(item.sshChild)) || !['unknown','owned','missing','conflict'].includes(String(item.listener))
       || !['unknown','healthy','failed','disabled'].includes(String(item.remoteProbe))) throw new Error('invalid health observation')
   }

@@ -103,6 +103,23 @@ describe('strict Device frame parsing', () => {
     assert.equal(frame.sessionEpoch, 'session-a')
   })
 
+  it('keeps v1 legacy observations valid and preserves optional actual sample/monotonic age', () => {
+    const observation = { leaseId: 'lease-a', generation: 1, state: 'running', sshChild: 'running', listener: 'owned', remoteProbe: 'disabled' }
+    const list = { v: 1, type: 'forward.list', ...fence, requestId: 'list', instances: [observation] }
+    const legacy = parseDeviceFrame(JSON.stringify(list))
+    assert.equal(legacy.type, 'forward.list')
+    if (legacy.type === 'forward.list') assert.equal(legacy.instances[0]?.probeAgeMs, undefined)
+    const sampled = { ...observation, remoteProbe: 'healthy', sampledAt: '2026-09-07T00:00:00.000Z', probeAgeMs: 31_000 }
+    const current = parseDeviceFrame(JSON.stringify({ ...list, instances: [sampled] }))
+    if (current.type === 'forward.list') {
+      assert.equal(current.instances[0]?.sampledAt, sampled.sampledAt)
+      assert.equal(current.instances[0]?.probeAgeMs, 31_000, 'parser cannot fresh-stamp cached health')
+    }
+    for (const extra of [{ probeAgeMs: -1 }, { probeAgeMs: 0.5 }, { probeAgeMs: '0' }, { probeAgeMs: Number.MAX_SAFE_INTEGER + 1 }, { sampledAt: 'not-time' }]) {
+      assert.throws(() => parseDeviceFrame(JSON.stringify({ ...list, instances: [{ ...sampled, ...extra }] })), /probeAgeMs|sampledAt/)
+    }
+  })
+
   it('rejects unknown fields so a Device cannot smuggle authority-bearing data', () => {
     assert.throws(() => parseDeviceFrame(JSON.stringify({
       v: 1,

@@ -13,10 +13,15 @@ import { CompanionEnrollmentService } from './enrollment.js'
 import { createCompanionHttpRoute, type CompanionHttpRoute, type CompanionRequestAuthenticator } from './http-route.js'
 import { CompanionService } from './service.js'
 import { JsonCompanionStateStore } from './store.js'
-import { assertTrustedAuthority, isTrustedCompanionRequest } from './trust.js'
+import { isTrustedCompanionRequest } from './trust.js'
+import { connectionTrustFence, ownerBrowserRejection } from './owner-browser.js'
+import { managedServicesCapability } from './managed-services.js'
+import { LocalServicesCoordinator, type DevServicesFacade } from './local-services.js'
+import { createLocalServiceRoute } from './local-service-route.js'
+import { OwnerLaunchApprovals } from './launch-approval.js'
 
 export const name = 'dsh-companion'
-export const inject = ['webServer', 'webRuntime', 'systemPrompt', 'tools', 'connection']
+export const inject = ['webServer', 'systemPrompt', 'tools', 'connection']
 
 export interface HostContext {
   connection?: CompanionRequestAuthenticator
@@ -28,7 +33,8 @@ export interface HostContext {
       handler(req: IncomingMessage, socket: Duplex, head: Buffer): void | Promise<void>
     }): () => void
   }
-  webRuntime: { trustedHosts: readonly string[] }
+  provide(name: string, service: unknown): unknown
+  get?(name: string): unknown
   systemPrompt: {
     section(section: PromptSection): () => void
   }
@@ -37,8 +43,7 @@ export interface HostContext {
 }
 
 export async function apply(ctx: HostContext): Promise<void> {
-  const trustedHosts = [...ctx.webRuntime.trustedHosts]
-  for (const authority of trustedHosts) assertTrustedAuthority(authority)
+  const trustedHosts = connectionTrustFence(ctx.connection as CompanionRequestAuthenticator)
 
   const dshHome = process.env.DSH_HOME ?? join(homedir(), '.dsh')
   const stateStore = new JsonCompanionStateStore(join(dshHome, 'companion', 'state.json'))
@@ -50,8 +55,7 @@ export async function apply(ctx: HostContext): Promise<void> {
     ctx.effect(() => ctx.webServer.register({
       kind: 'prefix', path: '/api/companion',
       async handler(req, res) {
-        const rejection = !isTrustedCompanionRequest(req, trustedHosts) ? 403
-          : typeof ctx.connection?.requestRejection !== 'function' ? 503 : ctx.connection.requestRejection(req)
+        const rejection = ownerBrowserRejection(ctx.connection, req)
         const status = rejection ?? 503
         res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' })
         res.end(JSON.stringify({ ok: false, error: {
@@ -62,11 +66,21 @@ export async function apply(ctx: HostContext): Promise<void> {
     }), 'dsh-companion: unavailable API')
     return
   }
+  ctx.provide('companionManagedServices', managedServicesCapability(service))
+  const devFor = () => ctx.get?.('devServices') as DevServicesFacade | undefined
+  const approvals = new OwnerLaunchApprovals(ctx.connection, devFor)
+  ctx.provide('devServicesOperatorApproval', approvals)
+  const coordinator = new LocalServicesCoordinator(service, devFor)
+  ctx.effect(() => ctx.webServer.register(createLocalServiceRoute(coordinator, devFor, ctx.connection, approvals)), 'dsh-companion: Local Services API')
   const enrollment = new CompanionEnrollmentService(service)
   const hub = new CompanionDeviceHub(service, trustedHosts, undefined, () => service.expireLeases().then(() => undefined))
 
   ctx.systemPrompt.section(COMPANION_GUIDANCE_SECTION)
-  for (const tool of createCompanionTools(service)) ctx.tools.register(tool)
+  for (const tool of createCompanionTools(service, async (record, exec) => {
+    const dev = devFor()
+    if (!record.workspacePath || !dev?.authorizeServiceRoot) throw new Error('Managed service Workspace authority is unavailable')
+    await dev.authorizeServiceRoot(exec, record.workspacePath)
+  })) ctx.tools.register(tool)
 
   ctx.effect(
     () => ctx.webServer.register(createCompanionHttpRoute(service, trustedHosts, undefined, undefined, undefined, ctx.connection, enrollment)),

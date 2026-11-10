@@ -122,6 +122,24 @@ test('only a full minute of healthy heartbeats resets network backoff', async t 
   assert.equal(s.sent.map(s=>JSON.parse(s)).filter(s=>s.type==='pong').length, 4)
 })
 
+test('forward.list forwards sampled evidence unchanged rather than fresh-stamping cached healthy', async t => {
+  const sampledAt = '2026-09-09T23:59:00.000Z'
+  const observation = { leaseId: 'lease', generation: 1, state: 'running' as const, sshChild: 'running' as const,
+    listener: 'owned' as const, remoteProbe: 'healthy' as const, sampledAt, probeAgeMs: 60_000 }
+  const f = await fixture(t, { observations: () => [observation] })
+  const socket = f.sockets[0]!
+  socket.hello(f.clock.now())
+  await flush()
+  for (const requestId of ['first', 'repeat']) {
+    socket.frame({ v: 1, type: 'forward.list', authorityEpoch: 'epoch', sessionEpoch: 'session', requestId })
+    await flush()
+    const reply = socket.sent.map(raw => JSON.parse(raw)).find(frame => frame.requestId === requestId)
+    assert.deepEqual(reply.instances, [observation])
+    assert.equal(reply.instances[0].sampledAt, sampledAt)
+    assert.equal(reply.instances[0].probeAgeMs, 60_000)
+  }
+})
+
 test('a transient local controller failure closes SSH before reconnecting instead of staying offline', async t => {
   let failTick = true, disconnects = 0
   const controller: ConnectionOptions['controller'] = {

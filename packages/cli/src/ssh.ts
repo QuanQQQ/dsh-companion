@@ -2,6 +2,7 @@ import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
+import { createConnection } from 'node:net'
 
 export interface SshCommandResult { code: number; stdout: string; stderr: string }
 export interface SshRunOptions { shell: false; signal: AbortSignal; maxOutputBytes: number }
@@ -152,6 +153,53 @@ export class SshExecutor {
       const owned = await this.verify(instance, this.settings.commandTimeoutMs)
       return owned && !instance.exited && !instance.stopping && this.instances.get(leaseId) === instance
     } catch { return false }
+  }
+
+  /** Bounded IPv4 loopback connect is transport reachability, never business health. */
+  async probe(leaseId: string): Promise<'healthy' | 'failed' | 'unknown'> {
+    const instance = this.instances.get(leaseId)
+    if (!instance || !await this.isOwned(leaseId)) return 'unknown'
+    const connected = await this.tcpConnect(instance.port)
+    // A reachable foreign replacement is not a healthy owned forward.
+    if (this.instances.get(leaseId) !== instance || !await this.isOwned(leaseId)) return 'unknown'
+    return connected === 'connected' ? 'healthy' : connected === 'refused' ? 'failed' : 'unknown'
+  }
+
+  /** Query after verified child exit: an unrelated listener is never killed or called missing. */
+  async listenerState(port: number): Promise<'missing' | 'conflict' | 'unknown'> {
+    if (!validPort(port)) return 'unknown'
+    try {
+      const result = await this.command(LSOF, ['-nP', '-a', '-iTCP:' + port, '-sTCP:LISTEN', '-Fpn'], this.settings.commandTimeoutMs)
+      if (result.code === 1 && !result.stdout.trim() && !result.stderr.trim()) {
+        // lsof may omit another user's process: successful connect still disproves absence.
+        const reachable = await this.tcpConnect(port)
+        return reachable === 'connected' ? 'conflict' : reachable === 'refused' ? 'missing' : 'unknown'
+      }
+      if (result.code !== 0 || result.stderr.trim()) return 'unknown'
+      const lines = result.stdout.trim().split('\n')
+      const names = lines.filter(line => line.startsWith('n'))
+      if (names.length && names.every(line => /:\d+$/.test(line) && line.endsWith(':' + port)) &&
+          lines.some(line => /^p[1-9]\d*$/.test(line))) return 'conflict'
+      return 'unknown'
+    } catch { return 'unknown' }
+  }
+
+  private tcpConnect(port: number): Promise<'connected' | 'refused' | 'unknown'> {
+    return new Promise(done => {
+      const socket = createConnection({ host: '127.0.0.1', port, family: 4 })
+      let settled = false
+      const finish = (result: 'connected' | 'refused' | 'unknown') => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        socket.destroy()
+        done(result)
+      }
+      const timer = setTimeout(() => finish('unknown'), this.settings.commandTimeoutMs)
+      socket.once('connect', () => finish('connected'))
+      socket.once('error', error => finish((error as NodeJS.ErrnoException).code === 'ECONNREFUSED' ? 'refused' : 'unknown'))
+      socket.once('close', () => finish('unknown'))
+    })
   }
 
   async stop(leaseId: string): Promise<void> {
